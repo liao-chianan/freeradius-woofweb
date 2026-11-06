@@ -22,14 +22,9 @@
 在全新的 Debian 13，用有 sudo 權限的帳號執行（Debian 預設沒有 curl，所以用 wget）：
 
 ```bash
-wget -qO- https://raw.githubusercontent.com/liao-chianan/freeradius-woofweb/main/install.sh | sudo bash
+wget -O install.sh https://raw.githubusercontent.com/liao-chianan/freeradius-woofweb/main/install.sh && sudo bash install.sh
 ```
-
-第一次安裝會詢問管理介面的連接埠（直接按 Enter 用預設的 3333）。也可以直接指定，或之後用同樣方式更改（設定與資料都會保留）：
-
-```bash
-wget -qO- https://raw.githubusercontent.com/liao-chianan/freeradius-woofweb/main/install.sh | sudo bash -s -- --port 8443
-```
+第一次安裝會詢問管理介面的連接埠（直接按 Enter 用預設的 3333或者自行輸入）。
 
 裝完會顯示一次性連結，用瀏覽器開啟後完成初始化。管理介面是 `https://<主機 IP>:<連接埠>/woofradius/`，其他路徑（包括 `/`）一律回 404，外部掃描看不到登入頁。一開始用自簽憑證，所以瀏覽器會出現警告。連接埠與路徑存在 `/etc/radius-manager/web.env`。
 
