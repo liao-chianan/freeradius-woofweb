@@ -30,8 +30,11 @@ done
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 [ "$(id -u)" = 0 ] || die "run as root, for example with sudo"
-. /etc/os-release
-[ "${ID:-}" = debian ] && [ "${VERSION_ID:-}" = 13 ] || die "only Debian 13 is supported (found ${PRETTY_NAME:-unknown})"
+# Read os-release in a subshell: it defines VERSION, NAME and others that would overwrite this script's variables
+# (VERSION="13 (trixie)" replaced the release to download).
+OS_INFO=$(. /etc/os-release 2>/dev/null; printf '%s|%s|%s' "${ID:-}" "${VERSION_ID:-}" "${PRETTY_NAME:-unknown}")
+IFS='|' read -r OS_ID OS_VERSION_ID OS_PRETTY <<< "$OS_INFO"
+[ "$OS_ID" = debian ] && [ "$OS_VERSION_ID" = 13 ] || die "only Debian 13 is supported (found $OS_PRETTY)"
 command -v systemctl >/dev/null || die "systemd is required"
 
 # ---- web interface port ----
@@ -85,8 +88,8 @@ else
   if [ "$VERSION" = main ]; then URL="https://github.com/$REPO/archive/refs/heads/main.tar.gz"
   else URL="https://github.com/$REPO/archive/refs/tags/$VERSION.tar.gz"; fi
   echo "==> Downloading $URL"
-  wget -qO "$WORK/src.tar.gz" "$URL"
-  tar -C "$WORK" --strip-components=1 -xzf "$WORK/src.tar.gz"
+  wget -qO "$WORK/src.tar.gz" "$URL" || die "cannot download $URL (check the version name and this host's internet access)"
+  tar -C "$WORK" --strip-components=1 -xzf "$WORK/src.tar.gz" || die "the downloaded file is not a valid archive"
   rm -f "$WORK/src.tar.gz"
 fi
 [ -f "$WORK/VERSION" ] && [ -f "$WORK/app/radius_manager.py" ] || die "the source is not a radius-manager tree"
