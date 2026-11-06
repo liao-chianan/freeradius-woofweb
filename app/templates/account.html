@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}帳號設定 - radius 登入管理{% endblock %}
+{% block page_class %}narrow{% endblock %}
+{% block content %}
+<section class="card">
+    <h1>帳號設定</h1>
+    <p class="muted">修改帳密後，其他裝置上的登入狀態都會被登出。</p>
+    {% if error %}<div class="notice error" role="alert">{{ error }}</div>{% endif %}
+    {% if message %}<div class="notice success" role="status">{{ message }}</div>{% endif %}
+    <form method="POST" class="stack" autocomplete="off">
+        <label>目前密碼<input type="password" name="current_password" autocomplete="current-password" required></label>
+        <label>帳號<input name="username" value="{{ username }}" autocomplete="username" required></label>
+        <label>新密碼<input type="password" name="new_password" autocomplete="new-password" minlength="{{ min_length }}">
+            <small class="muted">不改密碼請留白；至少 {{ min_length }} 個字元，包含大寫、小寫、數字、符號其中至少三種</small></label>
+        <label>確認新密碼<input type="password" name="confirm_password" autocomplete="new-password"></label>
+        <button type="submit" class="btn primary">儲存</button>
+    </form>
+</section>
+<section class="card section">
+    <h2>限制來源 IP</h2>
+    <p class="muted">只有清單內的 IP 可以連線到這個管理介面，已登入的連線也會立即被擋。留白表示不限制。目前連線的 IP 是 <span class="mono">{{ client_ip }}</span>。</p>
+    {% if ip_error %}<div class="notice error" role="alert">{{ ip_error }}</div>{% endif %}
+    {% if ip_message %}<div class="notice success" role="status">{{ ip_message }}</div>{% endif %}
+    <form method="POST" action="{{ base }}/account/allowed-ips" class="stack" autocomplete="off">
+        <label>允許的 IP 或 CIDR
+            <textarea name="allowed_cidrs" rows="5" class="mono" spellcheck="false">{{ allowed_cidrs }}</textarea>
+            <small class="muted">一行一筆，例如 192.168.1.0/24 或 192.168.1.10。</small></label>
+        <label>目前密碼<input type="password" name="current_password" autocomplete="current-password" required></label>
+        <button type="submit" class="btn primary">儲存來源 IP 限制</button>
+    </form>
+</section>
+{% endblock %}

@@ -1,0 +1,11 @@
+{% set bl = blacklist %}
+{% if bl.error %}<div class="notice error" role="alert">{{ bl.error }}</div>{% endif %}
+<details class="card section blacklist"{% if bl.names %} open{% endif %}>
+    <summary>黑名單：{% if bl.names %}<span class="status-off">{{ bl.names|length }} 個帳號一律不放行</span>{% else %}<span>沒有帳號</span>{% endif %}</summary>
+    <form method="post" action="{{ base }}/blacklist/{{ bl.source }}">
+        <input type="hidden" name="action" value="save">
+        <p class="muted">黑名單內的帳號即使密碼正確、所屬{{ '群組' if bl.source == 'ad' else '機構' }}已開放，也一律不能登入 Wi-Fi（優先於上方的 Wi-Fi 使用權限與裝置數設定）。一行一個{{ bl.label }}{% if bl.source == 'ad' %}，可含網域（例如 CORP\帳號），會自動去掉{% endif %}。已連線的裝置不會斷線，下次認證時才拒絕；被拒絕的紀錄會出現在驗證失敗歷史，原因是「帳號在黑名單中」。</p>
+        <textarea name="names" rows="{{ [[bl.names|length + 1, 3]|max, 12]|min }}" aria-label="黑名單{{ bl.label }}" spellcheck="false">{{ bl.names|join('\n') }}</textarea>
+        <button type="submit" class="btn primary">儲存黑名單</button>
+    </form>
+</details>

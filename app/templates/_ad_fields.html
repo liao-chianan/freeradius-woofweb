@@ -1,0 +1,15 @@
+<div class="field-grid">
+  <label>AD 網域（Realm）<input name="realm" value="{{ values.get('realm', settings.get('ad_realm', '')) }}" placeholder="corp.example.org" autocomplete="off" required>
+    <small class="muted">完整網域名稱。</small></label>
+  <label>NetBIOS 網域名稱（Workgroup）<input name="workgroup" value="{{ values.get('workgroup', settings.get('ad_workgroup', '')) }}" placeholder="CORP" autocomplete="off" required></label>
+  <label>網域控制站（選填）<input name="dc" value="{{ values.get('dc', settings.get('ad_dc', '')) }}" placeholder="dc1.corp.example.org 或 IP" autocomplete="off">
+    <small class="muted">留白時用 DNS 尋找，主機 DNS 要能解析 AD 網域。</small></label>
+  <label>電腦帳號名稱（選填）<input name="computer" value="{{ values.get('computer', settings.get('ad_computer', '')) }}" maxlength="15" autocomplete="off">
+    <small class="muted">最多 15 字，留白時用主機名稱。不可與網域內其他電腦相同。</small></label>
+  <label>可加入網域的帳號<input name="admin_user" autocomplete="off" required></label>
+  <label>密碼<input type="password" name="admin_password" autocomplete="new-password" required>
+    <small class="muted">只用來加入網域，不會儲存。</small></label>
+  <label>測試帳號（選填）<input name="test_user" value="{{ values.get('test_user', '') }}" autocomplete="off">
+    <small class="muted">一般使用者帳號，確認真的能驗證。</small></label>
+  <label>測試帳號密碼<input type="password" name="test_password" autocomplete="new-password"></label>
+</div>

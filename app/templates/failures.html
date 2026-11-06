@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block title %}驗證失敗歷史 - radius 登入管理{% endblock %}
+{% block content %}
+<div class="toolbar">
+    <div class="toolbar-title"><h1>驗證失敗歷史</h1><span class="count">共 {{ total }} 筆</span></div>
+    <form method="get" action="{{ base }}/failures" class="status-filter fail-search">
+        <input type="hidden" name="by" value="{{ group }}">
+        {% for key, label, value in filters %}<input type="hidden" name="{{ key }}" value="{{ value }}">{% endfor %}
+        <label>時間範圍
+            <select name="days" data-autosubmit>
+                {% for d in day_choices %}<option value="{{ d }}" {{ 'selected' if d == days }}>最近 {{ d }} 天</option>{% endfor %}
+            </select>
+        </label>
+        <input type="search" name="q" placeholder="搜尋 MAC、帳號或 SSID" aria-label="搜尋 MAC、帳號或 SSID" value="{{ q }}">
+        <button type="submit" class="btn">搜尋</button>
+    </form>
+</div>
+<p class="muted">紀錄保留 {{ retention }} 天。失敗時的 AD、Google 與外部帳號都是裝置自己送出的，未通過驗證，只能當線索。使用者在憑證或連線階段自行中斷、伺服器沒有回覆拒絕時，不會有紀錄。</p>
+{% if filters or q %}
+<div class="fail-filters">
+    <span class="muted">篩選：</span>
+    {% for key, label, value in filters %}<a class="btn small" href="{{ link(**{key: None, 'page': None}) }}" title="移除這個篩選">{{ label }}：{{ value or '（空白）' }} ✕</a>{% endfor %}
+    {% if q %}<a class="btn small" href="{{ link(q=None, page=None) }}" title="移除這個篩選">搜尋：{{ q }} ✕</a>{% endif %}
+</div>
+{% endif %}
+<div class="stats">
+    <div class="stat"><b>{{ total }}</b><span>失敗次數</span></div>
+    <div class="stat"><b>{{ macs }}</b><span>裝置 MAC 數</span></div>
+    <div class="stat"><b>{{ accounts }}</b><span>AD 帳號數</span></div>
+    <div class="stat"><b>{{ google_accounts }}</b><span>Google 帳號數</span></div>
+    <div class="stat"><b>{{ proxy_accounts }}</b><span>外部帳號數</span></div>
+</div>
+<section class="card section">
+    <h2>失敗統計</h2>
+    <div class="fail-tabs">
+        {% for key, label in groups.items() %}<a class="btn small {{ 'current' if key == group }}" href="{{ link(by=key, page=None) }}"{% if key == group %} aria-current="true"{% endif %}>依{{ label }}</a>{% endfor %}
+    </div>
+    {% if stats %}
+    <div class="table-wrap"><table class="compact">
+        <thead><tr><th>{{ groups[group] }}</th><th>失敗次數</th><th>最後一次</th></tr></thead>
+        <tbody>{% for s in stats %}<tr><td class="{{ 'mono' if group == 'mac' }}"><a href="{{ link(**{group: s.value, 'page': None}) }}" title="只看這一項的紀錄">{{ s.value or '（空白）' }}</a></td><td>{{ s.count }}</td><td class="nowrap">{{ s.last }}</td></tr>{% endfor %}</tbody>
+    </table></div>
+    {% if group_total > stats_limit %}<p class="muted">共 {{ group_total }} 項，只列出次數最多的 {{ stats_limit }} 項。</p>{% endif %}
+    {% else %}<p class="muted">沒有符合的紀錄。</p>{% endif %}
+</section>
+<div class="table-wrap card section">
+    <h2>失敗紀錄</h2>
+    {% if entries %}
+    <table class="compact">
+        <thead><tr><th>連線時間</th><th>裝置 MAC</th><th>AD 帳號</th><th>Google 帳號</th><th>外部帳號</th><th>SSID</th><th>AP</th><th>失敗原因</th></tr></thead>
+        <tbody>
+            {% for e in entries %}
+            <tr>
+                <td class="nowrap">{{ e.time }}</td>
+                <td class="mono nowrap">{{ e.mac or '-' }}</td>
+                <td>{{ e.account or '-' }}</td>
+                <td>{{ e.google or '-' }}</td>
+                <td>{{ e.proxy or '-' }}</td>
+                <td>{{ e.ssid or '-' }}</td>
+                <td title="{% if e.ap_mac %}{{ e.ap_mac }}，{% endif %}來源 {{ e.ip }}">{{ e.ap_name }}</td>
+                <td title="{{ e.detail }}">{{ e.reason }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}<p class="muted">沒有符合的紀錄。</p>{% endif %}
+    {% if page > 1 or has_next %}
+    <div class="pager">
+        {% if page > 1 %}<a class="btn small" href="{{ link(page=page - 1) }}">上一頁</a>{% endif %}
+        <span class="muted">第 {{ page }} 頁</span>
+        {% if has_next %}<a class="btn small" href="{{ link(page=page + 1) }}">下一頁</a>{% endif %}
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='failures.js') }}"></script>{% endblock %}

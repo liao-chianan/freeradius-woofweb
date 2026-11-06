@@ -1,0 +1,12 @@
+[Unit]
+Description=Export Google organizational units and users for radius-manager
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/radius-manager/current/bin/radius-manager-google-dir
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/radius-manager

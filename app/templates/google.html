@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}Google 帳號 - radius 登入管理{% endblock %}
+{% block content %}
+{% include "_group_policy.html" %}
+{% include "_blacklist.html" %}
+<div class="toolbar"><div class="toolbar-title"><h1>Google 帳號</h1><span class="count">共 {{ accounts|length }} 個帳號</span></div>
+    <div class="toolbar-actions"><a class="btn" href="{{ base }}/google?refresh=1">重新查詢 Google</a></div></div>
+<p class="muted">下表是用 Google 帳號（Secure LDAP）成功登入過 Wi-Fi 的帳號；完整名單請點上方的機構。要讓某個 SSID 使用 Google 驗證，請到<a href="{{ base }}/ssid">SSID 驗證與 VLAN</a> 頁的規則。可驗證的帳號範圍在 Google 管理控制台的 LDAP 用戶端設定。</p>
+<div class="table-wrap card">
+    {% if accounts %}
+    <table class="ad-table">
+        <thead><tr><th>帳號</th><th>裝置 MAC</th><th>週期裝置</th><th>最近登入</th><th>登入次數</th><th class="actions-col">操作</th></tr></thead>
+        <tbody>
+            {% for u in accounts %}
+            <tr>
+                <td class="strong"><a href="{{ base }}/google?account={{ u.account|urlencode }}">{{ u.account }}</a>{% if u.blacklisted %} <span class="badge-off">黑名單</span>{% endif %}</td>
+                <td class="mono">{% for mac in u.macs %}<div>{{ mac }}</div>{% else %}<span class="muted">尚無紀錄</span>{% endfor %}{% for d in u.denied %}<div class="status-off" title="本週期被拒絕 {{ d.count }} 次，最後一次 {{ d.last }}">{{ d.mac }}<br>被拒絕</div>{% endfor %}</td>
+                <td class="nowrap">{% if device_limit == 0 or u.exempt %}{{ u.today }}（不限）{% else %}{{ u.today }} / {{ device_limit }}{% endif %}{% if u.today or u.denied %}
+                    <form method="post" action="{{ base }}/device-limit/reset" class="device-reset" data-confirm="要重置 {{ u.account }} 的裝置數嗎？">
+                        <input type="hidden" name="account" value="{{ u.key }}"><button type="submit" class="btn small">重置</button>
+                    </form>{% endif %}</td>
+                <td class="nowrap">{{ u.last }}</td>
+                <td>{{ u.logins }}</td>
+                <td class="actions-col"><form method="post" action="{{ base }}/blacklist/google" class="inline-form" data-confirm="{{ '要把 ' ~ u.account ~ ' 移出黑名單嗎？' if u.blacklisted else '要把 ' ~ u.account ~ ' 加入黑名單嗎？加入後這個帳號不能登入 Wi-Fi。' }}">
+                    <input type="hidden" name="action" value="{{ 'remove' if u.blacklisted else 'add' }}"><input type="hidden" name="account" value="{{ u.account }}">
+                    <button type="submit" class="btn small{{ '' if u.blacklisted else ' danger-outline' }}">{{ '移出黑名單' if u.blacklisted else '加入黑名單' }}</button>
+                </form></td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}<p class="empty">目前還沒有人用 Google 帳號登入過。</p>{% endif %}
+</div>
+{% if selected %}
+<section class="card section">
+    <h2>{{ selected }} 的登入紀錄</h2>
+    {% if detail %}
+    <div class="table-wrap"><table class="compact">
+        <thead><tr><th>時間</th><th>裝置 MAC</th><th>SSID</th><th>AP</th></tr></thead>
+        <tbody>{% for d in detail %}<tr><td class="nowrap">{{ d.time }}</td><td class="mono">{{ d.mac or '-' }}</td><td>{{ d.ssid or '-' }}</td><td>{{ d.ap_name }}</td></tr>{% endfor %}</tbody>
+    </table></div>
+    {% else %}<p class="muted">沒有紀錄。</p>{% endif %}
+</section>
+{% endif %}
+{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='failures.js') }}"></script>{% endblock %}

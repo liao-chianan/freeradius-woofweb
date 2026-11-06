@@ -1,0 +1,8 @@
+# radius-manager: SSID 規則，由 sites-available/default 的 authorize 以 %{ssid_policy:...} 呼叫。
+# 不可改成直接呼叫模組：rlm_exec 在程式異常結束時會把回覆改成 Access-Reject。%{...} 形式異常時只是取不到值，改用內建判斷。
+exec ssid_policy {
+	wait = yes
+	#  Called-Station-Id 以 %{hex:...} 傳入：直接放在命令列時，引號會讓程式執行失敗，%{...} 也會被再展開一次
+	shell_escape = no
+	timeout = 3
+}

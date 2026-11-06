@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch authorized_macs and restart FreeRADIUS on change
+
+[Path]
+PathChanged=/etc/freeradius/3.0/authorized_macs
+Unit=radius-manager-macs-restart.service
+
+[Install]
+WantedBy=multi-user.target

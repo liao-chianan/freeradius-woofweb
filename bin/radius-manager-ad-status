@@ -1,0 +1,85 @@
+#!/usr/bin/python3 -I
+"""以機器帳號唯讀查詢 AD 帳號、顯示名稱、所屬單位（DN 裡最接近帳號的 OU）、是否停用與所屬群組，寫成檔案給 radius-manager 與 FreeRADIUS 讀取（兩者都沒有權限查）。
+群組包含主要群組（不在 memberOf 內）與巢狀群組。查詢失敗或筆數對不上就結束並保留舊檔。"""
+import json, os, pwd, re, subprocess, sys, tempfile, time
+OUT = os.environ.get('AD_STATUS_FILE', '/var/lib/radius-manager/ad_status.json')
+MEMBERS_OUT = os.environ.get('AD_MEMBERS_FILE', '/var/log/freeradius/macauth/ad-members.json')
+NET = os.environ.get('AD_STATUS_NET', '/usr/bin/net')
+USER_FILTER = '(&(objectCategory=person)(objectClass=user))'
+GROUP_FILTER = '(objectCategory=group)'
+BUILTIN_PREFIX = 'S-1-5-32-'
+ACCOUNTDISABLE = 2
+
+
+def first_ou(dn):
+    """CN=王小明,OU=教務處,OU=行政,DC=x 回傳「教務處」；不在 OU 底下（如 CN=Users）回傳空字串。逗號可能跳脫，不能直接 split。"""
+    for part in re.findall(r'(?:[^,\\]|\\.)+', dn):
+        if part[:3].upper() == 'OU=':
+            return re.sub(r'\\(.)', r'\1', part[3:]).strip()
+    return ''
+
+
+def search(ldap_filter, *attrs):
+    """回傳每筆的屬性字典，值一律是清單。回覆筆數對不上就中止，不可把不完整的資料寫出去。"""
+    result = subprocess.run([NET, 'ads', 'search', '-P', ldap_filter, 'sAMAccountName', *attrs],
+                            capture_output=True, text=True, errors='replace', timeout=120)
+    if result.returncode != 0:
+        sys.exit(f'net ads search failed: exit {result.returncode}')
+    replies = re.search(r'^Got (\d+) replies', result.stdout, re.M)
+    entries = []
+    for block in result.stdout.split('\n\n'):
+        entry = {}
+        for name, value in re.findall(r'^([A-Za-z]+): (.+)$', block, re.M):
+            entry.setdefault(name, []).append(value.strip())
+        if 'sAMAccountName' in entry:
+            entries.append(entry)
+    if not replies or not entries or len(entries) != int(replies[1]):
+        sys.exit(f'unexpected output: replies={replies and replies[1]} parsed={len(entries)}')
+    return entries
+
+
+def one(entry, name):
+    return entry.get(name, [''])[0]
+
+
+def write_json(path, data, uid, gid, mode):
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path))
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False)
+            os.fchown(f.fileno(), uid, gid)
+            os.fchmod(f.fileno(), mode)
+        os.replace(tmp, path)
+    except Exception:
+        os.unlink(tmp)
+        raise
+
+
+groups = search(GROUP_FILTER, 'objectSid', 'distinguishedName', 'memberOf')
+users = search(USER_FILTER, 'displayName', 'userAccountControl', 'distinguishedName', 'memberOf', 'primaryGroupID')
+sid_by_dn = {one(g, 'distinguishedName').lower(): one(g, 'objectSid') for g in groups}
+parents = {one(g, 'objectSid'): [sid_by_dn[dn.lower()] for dn in g.get('memberOf', []) if dn.lower() in sid_by_dn] for g in groups}
+# primaryGroupID 是網域內的 RID，內建群組（S-1-5-32）的 RID 不是同一個命名空間
+sid_by_rid = {one(g, 'objectSid').rsplit('-', 1)[1]: one(g, 'objectSid') for g in groups if not one(g, 'objectSid').startswith(BUILTIN_PREFIX)}
+accounts = []
+for user in users:
+    pending = [sid_by_dn[dn.lower()] for dn in user.get('memberOf', []) if dn.lower() in sid_by_dn]
+    primary = sid_by_rid.get(one(user, 'primaryGroupID'))
+    if primary:
+        pending.append(primary)
+    member_of = set()
+    while pending:
+        sid = pending.pop()
+        if sid not in member_of:
+            member_of.add(sid)
+            pending.extend(parents.get(sid, []))
+    if not one(user, 'userAccountControl').isdigit():
+        sys.exit('unexpected output: userAccountControl')
+    accounts.append({'account': one(user, 'sAMAccountName'), 'name': one(user, 'displayName'), 'ou': first_ou(one(user, 'distinguishedName')),
+                     'disabled': bool(int(one(user, 'userAccountControl')) & ACCOUNTDISABLE), 'groups': sorted(member_of)})
+owner = pwd.getpwnam('radmgr')
+now = int(time.time())
+write_json(OUT, {'time': now, 'accounts': accounts, 'groups': [{'sid': one(g, 'objectSid'), 'name': one(g, 'sAMAccountName')} for g in groups]},
+           owner.pw_uid, owner.pw_gid, 0o600)
+# FreeRADIUS 每次登入讀這個檔；只放判斷需要的帳號與群組 SID
+write_json(MEMBERS_OUT, {'time': now, 'members': {a['account'].lower(): a['groups'] for a in accounts}}, pwd.getpwnam('freerad').pw_uid, owner.pw_gid, 0o640)

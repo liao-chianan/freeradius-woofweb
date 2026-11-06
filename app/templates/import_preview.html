@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}匯入比對 - radius 登入管理{% endblock %}
+{% block content %}
+<div class="toolbar"><div class="toolbar-title"><h1>匯入比對</h1>
+    <span class="count">{{ '完全取代' if mode == 'replace' else '合併' }}</span></div></div>
+{% if errors %}
+<section class="card section">
+    <div class="notice error" role="alert">檢核未通過，名單沒有任何變更。請修正 CSV 後重新上傳。</div>
+    <ul>{% for e in errors %}<li>{{ e }}</li>{% endfor %}</ul>
+    <a class="btn" href="{{ base }}/">返回清單</a>
+</section>
+{% else %}
+<div class="stats">
+    <div class="stat good"><b>{{ plan.added|length }}</b><span>新增</span></div>
+    <div class="stat warn"><b>{{ plan.changed|length }}</b><span>修改</span></div>
+    <div class="stat bad"><b>{{ plan.deleted|length }}</b><span>刪除</span></div>
+    <div class="stat"><b>{{ plan.unchanged }}</b><span>不變</span></div>
+</div>
+{% for w in plan.warnings %}<div class="notice warning" role="status">{{ w }}</div>{% endfor %}
+{% if plan.deleted %}<div class="notice error" role="alert">完全取代會刪除 {{ plan.deleted|length }} 筆既有資料，這些裝置將無法再通過認證。</div>{% endif %}
+{% if plan.added %}
+<section class="card section"><h2>新增 {{ plan.added|length }} 筆</h2><div class="table-wrap"><table class="compact">
+    <thead><tr><th>裝置名稱</th><th>MAC</th><th>VLAN</th></tr></thead>
+    <tbody>{% for e in plan.added %}<tr><td>{{ e.id }}</td><td class="mono">{{ e.mac }}</td><td>{{ e.tunnel_group }}</td></tr>{% endfor %}</tbody>
+</table></div></section>
+{% endif %}
+{% if plan.changed %}
+<section class="card section"><h2>修改 {{ plan.changed|length }} 筆</h2><div class="table-wrap"><table class="compact">
+    <thead><tr><th>裝置（修改前）</th><th>欄位</th><th>修改前</th><th>修改後</th></tr></thead>
+    <tbody>{% for c in plan.changed %}{% for field, values in c.changes.items() %}
+    <tr><td>{{ c.before.id }}</td><td>{{ labels[field] }}</td><td class="mono old">{{ values[0] }}</td><td class="mono new">{{ values[1] }}</td></tr>
+    {% endfor %}{% endfor %}</tbody>
+</table></div></section>
+{% endif %}
+{% if plan.deleted %}
+<section class="card section"><h2>刪除 {{ plan.deleted|length }} 筆</h2><div class="table-wrap"><table class="compact">
+    <thead><tr><th>裝置名稱</th><th>MAC</th><th>VLAN</th></tr></thead>
+    <tbody>{% for e in plan.deleted %}<tr><td>{{ e.id }}</td><td class="mono">{{ e.mac }}</td><td>{{ e.tunnel_group }}</td></tr>{% endfor %}</tbody>
+</table></div></section>
+{% endif %}
+{% if has_changes %}
+<div class="card section confirm-bar">
+    <p>確認後會先備份，再更新名單並重啟 FreeRADIUS，認證可能短暫中斷。</p>
+    <div class="dialog-actions">
+        <form method="post" action="{{ base }}/import/cancel"><input type="hidden" name="token" value="{{ token }}"><button class="btn" type="submit">取消匯入</button></form>
+        <form method="post" action="{{ base }}/import/commit"><input type="hidden" name="token" value="{{ token }}"><input type="hidden" name="confirmed" value="1">
+            <button class="btn {{ 'danger' if plan.deleted else 'primary' }}" type="submit">確認匯入</button></form>
+    </div>
+</div>
+{% else %}
+<div class="notice success" role="status">檔案內容與目前名單相同，不需要變更。</div>
+<a class="btn" href="{{ base }}/">返回清單</a>
+{% endif %}
+{% endif %}
+{% endblock %}

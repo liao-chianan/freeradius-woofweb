@@ -1,0 +1,7 @@
+# radius-manager: Wi-Fi 黑名單與群組限制，由 inner-tunnel 的 post-auth 以 %{group_policy:...} 呼叫。
+# 不可改成直接呼叫模組：rlm_exec 在程式異常結束時會把回覆改成 Access-Reject，程式壞掉就會全校登入失敗。
+exec group_policy {
+	wait = yes
+	shell_escape = yes
+	timeout = 5
+}

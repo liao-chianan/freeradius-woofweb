@@ -1,0 +1,12 @@
+<tr data-id="{{ e.id }}" data-mac="{{ e.mac }}" data-last="{{ e.last }}" data-type="{{ e.tunnel_type }}" data-medium="{{ e.tunnel_medium }}" data-group="{{ e.tunnel_group }}" data-modified="{{ e.modified }}">
+    <td class="strong">{{ e.id }}</td>
+    <td class="mono">{{ e.mac }}</td>
+    <td>{{ e.tunnel_group }}</td>
+    <td class="nowrap">{% if e.modified %}{{ e.modified }}{% else %}<span class="muted">未記錄</span>{% endif %}</td>
+    <td class="nowrap">{% if e.last %}{{ e.last }}{% else %}<span class="muted">尚無紀錄</span>{% endif %}</td>
+    <td class="actions-col">
+        <button type="button" class="btn small js-logins">登入紀錄</button>
+        <button type="button" class="btn small js-edit">編輯</button>
+        <button type="button" class="btn small danger-outline js-delete">刪除</button>
+    </td>
+</tr>

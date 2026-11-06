@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}SSID 驗證與 VLAN - radius 登入管理{% endblock %}
+{% block content %}
+<div class="toolbar"><div class="toolbar-title"><h1>SSID 驗證與 VLAN</h1></div><div class="toolbar-actions"><button type="submit" form="ssid-form" class="btn primary">儲存並套用</button></div></div>
+{% if error %}<div class="notice error" role="alert">{{ error }}</div>{% endif %}
+<p class="muted">依順序由小到大比對，SSID 包含關鍵字（不分大小寫）就用該列的規則，第一個吻合的生效，例如「Device」會吻合 School_Device 和 School_2.4G_Device。</p>
+<p class="muted">VLAN 留白時，放行裝置名單用名單內每台裝置的 VLAN，AD 帳號不發 VLAN（由 AP 的 SSID 設定決定）。放行裝置規則填了 VLAN，會蓋過名單內的 VLAN。AP 或控制器要開啟 RADIUS 動態 VLAN，且該 VLAN 要接到 AP，否則裝置可能連不上網路。</p>
+<p class="muted">Google 帳號規則：裝置必須使用 PEAP-GTC 或 EAP-TTLS/PAP，帳號填完整 email，並驗證伺服器憑證。這會把使用者的 Google 密碼送到這台伺服器驗證，且驗證當下需要連得到 Google。</p>
+<form method="POST" action="{{ base }}/ssid" id="ssid-form" class="card section">
+    <div class="table-wrap">
+    <table class="ssid-table">
+        <thead><tr><th class="order-col">順序</th><th>SSID 關鍵字</th><th class="auth-col">驗證方式</th><th class="vlan-col">VLAN</th></tr></thead>
+        <tbody>
+            {% for r in rows %}
+            <tr>
+                <td class="order-col"><input name="order" inputmode="numeric" value="{{ r.order }}" aria-label="順序"></td>
+                <td><input name="keyword" value="{{ r.keyword }}" maxlength="32" aria-label="SSID 關鍵字"></td>
+                <td class="auth-col"><select name="auth" aria-label="驗證方式">{% for k, v in labels.items() %}<option value="{{ k }}" {{ 'selected' if r.auth == k }}>{{ v }}</option>{% endfor %}</select></td>
+                <td class="vlan-col"><input name="vlan" inputmode="numeric" value="{{ r.vlan }}" aria-label="VLAN"></td>
+            </tr>
+            {% endfor %}
+            <tr class="ssid-default-row">
+                <td class="order-col muted">最後</td>
+                <td class="muted">（沒有吻合任何關鍵字時）</td>
+                <td class="auth-col"><select name="default_auth" aria-label="沒有吻合任何關鍵字時的驗證方式">{% for k, v in labels.items() %}<option value="{{ k }}" {{ 'selected' if default.auth == k }}>{{ v }}</option>{% endfor %}</select></td>
+                <td class="vlan-col"><input name="default_vlan" inputmode="numeric" value="{{ default.vlan }}" aria-label="沒有吻合任何關鍵字時的 VLAN"></td>
+            </tr>
+        </tbody>
+    </table>
+    </div>
+    <p class="muted">最後一列「沒有吻合任何關鍵字時」與上面的規則一起儲存。要刪除規則請清空關鍵字；要新增更多規則，先儲存後會再多出空白列。最多 {{ max_rules }} 筆。
+        按「儲存並套用」會先跳出更動範圍，確認後立即生效。</p>
+</form>
+<section class="card section">
+    <h2>最近 {{ seen_days }} 天登入過的 SSID</h2>
+    {% if impact %}
+    <div class="table-wrap"><table class="compact">
+        <thead><tr><th>SSID</th><th>名單裝置登入</th><th>AD 登入</th><th>Google 登入</th><th>Proxy 登入</th><th>目前規則</th><th>依據</th></tr></thead>
+        <tbody>{% for i in impact %}<tr><td class="strong">{{ i.ssid }}</td><td>{{ i.mac }}</td><td>{{ i.ad }}</td><td>{{ i.google }}</td><td>{{ i.proxy }}</td><td>{{ i.after }}</td><td>{{ i.source }}</td></tr>{% endfor %}</tbody>
+    </table></div>
+    {% else %}<p class="muted">尚無紀錄。</p>{% endif %}
+</section>
+<div class="page-actions"><button type="submit" form="ssid-form" class="btn primary">儲存並套用</button></div>
+
+<dialog id="ssid-confirm" class="wide" aria-labelledby="ssid-confirm-title">
+    <h2 id="ssid-confirm-title">確認儲存 SSID 規則</h2>
+    <div class="notice error" id="ssid-confirm-proxy" role="alert" hidden>有規則使用 Proxy 代理，但尚未在 Proxy 代理頁設定外部 RADIUS，這些 SSID 的登入會全部被拒絕。</div>
+    <div class="notice error" id="ssid-confirm-warn" role="alert" hidden>有 SSID 的登入會受影響，請看下方的警告後再確認。</div>
+    <h3>更動的規則</h3>
+    <ul id="ssid-confirm-changes"></ul>
+    <h3>對最近 {{ seen_days }} 天登入過的 SSID 的影響</h3>
+    <p class="muted" id="ssid-confirm-none" hidden>最近登入過的 SSID 都不受影響。</p>
+    <div class="table-wrap" id="ssid-confirm-impact-wrap" hidden><table class="compact">
+        <thead><tr><th>SSID</th><th>目前</th><th>套用後</th><th>警告</th></tr></thead>
+        <tbody id="ssid-confirm-impact"></tbody>
+    </table></div>
+    <p class="muted" id="ssid-confirm-unaffected"></p>
+    <p class="muted">確認後立即儲存並套用，下一次登入就依新規則判斷，不需重啟 FreeRADIUS；已連線的裝置不會斷線。</p>
+    <form method="post" action="{{ base }}/ssid" class="dialog-actions" id="ssid-confirm-form">
+        <input type="hidden" name="confirmed" value="1"><input type="hidden" name="rules_json" id="ssid-confirm-json">
+        <button type="button" class="btn" id="ssid-confirm-cancel">取消</button>
+        <button type="submit" class="btn primary">確認並套用</button>
+    </form>
+</dialog>
+{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='ssid.js') }}"></script>{% endblock %}

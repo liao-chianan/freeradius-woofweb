@@ -1,0 +1,9 @@
+[Unit]
+Description=Refresh AD account data when radius-manager requests it
+
+[Path]
+PathChanged=/var/lib/radius-manager/ad_refresh
+Unit=radius-manager-ad-status.service
+
+[Install]
+WantedBy=multi-user.target

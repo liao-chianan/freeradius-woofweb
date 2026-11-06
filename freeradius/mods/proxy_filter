@@ -1,0 +1,7 @@
+# radius-manager: Proxy 代理的帳號黑白名單，由 inner-tunnel 的 authorize 以 %{proxy_filter:...} 呼叫。
+# 只有輸出 allow 才轉送給外部 RADIUS；不可改成直接呼叫模組（程式異常會變成 rlm_exec 的結果，難以判斷）。
+exec proxy_filter {
+	wait = yes
+	shell_escape = yes
+	timeout = 5
+}

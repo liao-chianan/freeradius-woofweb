@@ -1,0 +1,8 @@
+# radius-manager: 記錄 AD 帳號（802.1X）認證成功。格式：epoch|帳號|裝置 MAC|封包來源 IP|NAS-IP-Address|Called-Station-Id（SSID 可能含 |，必須放最後）
+# 帳號取自 inner-tunnel 實際驗證的身分（session-state:Tmp-String-0），不用可被偽造的外層 User-Name
+linelog adauth_log {
+	filename = ${logdir}/macauth/ad-%Y%m%d.log
+	escape_filenames = no
+	permissions = 0640
+	format = "%l|%{session-state:Tmp-String-0}|%{Calling-Station-Id}|%{%{Packet-Src-IP-Address}:-%{Packet-Src-IPv6-Address}}|%{%{NAS-IP-Address}:-%{NAS-IPv6-Address}}|%{Called-Station-Id}"
+}

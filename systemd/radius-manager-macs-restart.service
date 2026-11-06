@@ -1,0 +1,7 @@
+[Unit]
+Description=Restart FreeRADIUS after authorized_macs change
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl restart freeradius.service

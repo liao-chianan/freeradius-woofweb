@@ -1,0 +1,8 @@
+# radius-manager: 記錄 Proxy 代理（外部 RADIUS）登入成功。格式：epoch|hex(帳號)|裝置 MAC|封包來源 IP|NAS-IP-Address|Called-Station-Id（SSID 可能含 |，必須放最後）
+# 帳號是裝置送出、由外部 RADIUS 驗證通過的內層帳號，以 hex 寫入。
+linelog proxyauth_log {
+	filename = ${logdir}/macauth/proxy-%Y%m%d.log
+	escape_filenames = no
+	permissions = 0640
+	format = "%l|%{hex:&session-state:Tmp-String-5}|%{Calling-Station-Id}|%{%{Packet-Src-IP-Address}:-%{Packet-Src-IPv6-Address}}|%{%{NAS-IP-Address}:-%{NAS-IPv6-Address}}|%{Called-Station-Id}"
+}

@@ -1,0 +1,45 @@
+# radius-manager: Google Workspace Secure LDAP。identity、password、base_dn 在 ldap-google.conf（640 freerad，由 radius-manager 寫入）。
+# pool start/min = 0：Google 連不上時 FreeRADIUS 仍要能啟動，MAC 與 AD 認證不可受影響。
+# require_cert = demand：Google 範例用 allow，不驗伺服器憑證；這裡會把使用者的 Google 密碼送出去，一定要驗。
+ldap ldap_google {
+	server = 'ldaps://ldap.google.com'
+	port = 636
+	$INCLUDE ${confdir}/ldap-google.conf
+	user_dn = "LDAP-UserDn"
+	user {
+		base_dn = "${..base_dn}"
+		filter = "(mail=%{User-Name})"
+		scope = 'sub'
+	}
+	group {
+		base_dn = "${..base_dn}"
+		filter = '(objectClass=groupOfNames)'
+		membership_attribute = 'memberOf'
+	}
+	options {
+		chase_referrals = no
+		res_timeout = 8
+		srv_timelimit = 5
+		net_timeout = 4
+		idle = 60
+		probes = 3
+		interval = 3
+	}
+	tls {
+		start_tls = no
+		certificate_file = ${certdir}/ldap-client.crt
+		private_key_file = ${certdir}/ldap-client.key
+		ca_file = /etc/ssl/certs/ca-certificates.crt
+		require_cert = 'demand'
+	}
+	pool {
+		start = 0
+		min = 0
+		max = 8
+		spare = 2
+		uses = 0
+		retry_delay = 5
+		lifetime = 0
+		idle_timeout = 60
+	}
+}

@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}radius 登入管理{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body data-base="{{ base }}">
+    {% if session.get('user') and not request.path.startswith('/setup') %}
+    <header class="topbar">
+        <a class="brand" href="{{ base }}/">{% if org_name %}<span class="brand-org">{{ org_name }}</span>{% endif %}radius 登入管理</a>
+        <nav class="topnav">
+            <a href="{{ base }}/" class="{{ 'active' if request.path == '/' }}">放行裝置清單</a>
+            {% if ad_enabled %}<a href="{{ base }}/ad" class="{{ 'active' if request.path == '/ad' }}">AD 帳號</a>{% endif %}
+            {% if google_enabled %}<a href="{{ base }}/google" class="{{ 'active' if request.path == '/google' }}">Google 帳號</a>{% endif %}
+            <a href="{{ base }}/ap" class="{{ 'active' if request.path.startswith('/ap') }}">AP 管理</a>
+            <a href="{{ base }}/proxy" class="{{ 'active' if request.path.startswith('/proxy') }}">Proxy 代理</a>
+            <a href="{{ base }}/failures" class="{{ 'active' if request.path == '/failures' }}">驗證失敗歷史</a>
+            <a href="{{ base }}/ssid" class="{{ 'active' if request.path == '/ssid' }}">SSID 驗證與 VLAN</a>
+            <a href="{{ base }}/settings" class="{{ 'active' if request.path.startswith('/settings') }}">系統設定</a>
+            <a href="{{ base }}/account" class="{{ 'active' if request.path == '/account' }}">帳號設定</a>
+            <a href="{{ base }}/logout">登出</a>
+        </nav>
+    </header>
+    {% endif %}
+    <main class="page {% block page_class %}{% endblock %}">
+        {% for category, text in get_flashed_messages(with_categories=true) %}
+        <div class="notice {{ category }}" role="status">{{ text }}</div>
+        {% endfor %}
+        {% block content %}{% endblock %}
+    </main>
+    {% if app_version %}<footer class="app-footer">freeradius-woofweb {{ app_version }}</footer>{% endif %}
+    {% block scripts %}{% endblock %}
+</body>
+</html>

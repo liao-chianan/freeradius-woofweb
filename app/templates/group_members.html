@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} - radius 登入管理{% endblock %}
+{% block content %}
+<div class="toolbar"><div class="toolbar-title"><h1>{{ title }}</h1><span class="count">共 {{ rows|length }} 筆</span></div>
+    <div class="toolbar-actions"><a class="btn" href="{{ base }}{{ back }}">返回</a></div></div>
+<div class="table-wrap card">
+    {% if rows %}
+    <table class="ad-table">
+        <thead><tr><th>{{ primary_label }}</th><th>姓名</th><th>{{ '單位' if show_state else '機構' }}</th>{% if show_state %}<th>狀態</th>{% endif %}</tr></thead>
+        <tbody>{% for row in rows %}<tr>
+            <td class="strong">{{ row.primary }}{% if row.blacklisted %} <span class="badge-off">黑名單</span>{% endif %}</td>
+            <td>{% if row.name %}{{ row.name }}{% else %}<span class="muted">未填寫</span>{% endif %}</td>
+            <td class="nowrap">{% if row.ou %}{{ row.ou }}{% else %}<span class="muted">未分類</span>{% endif %}</td>
+            {% if show_state %}<td class="nowrap">{% if row.disabled %}<span class="status-off">停用</span>{% else %}啟用{% endif %}</td>{% endif %}
+        </tr>{% endfor %}</tbody>
+    </table>
+    {% else %}<p class="empty">沒有成員。</p>{% endif %}
+</div>
+{% endblock %}

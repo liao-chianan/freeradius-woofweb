@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}登入 - radius 登入管理{% endblock %}
+{% block page_class %}narrow{% endblock %}
+{% block content %}
+<section class="card auth-card">
+    <h1>radius 登入管理</h1>
+    <p class="muted">請登入以管理 RADIUS 授權名單</p>
+    {% if error %}<div class="notice error" role="alert">{{ error }}</div>{% endif %}
+    <form method="POST" class="stack">
+        <label>帳號<input name="username" autocomplete="username" required autofocus></label>
+        <label>密碼<input type="password" name="password" autocomplete="current-password" required></label>
+        <button type="submit" class="btn primary block">登入</button>
+    </form>
+</section>
+{% endblock %}

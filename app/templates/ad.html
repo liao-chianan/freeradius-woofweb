@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}AD 帳號 - radius 登入管理{% endblock %}
+{% block content %}
+{% if not status_updated %}<div class="notice error" role="alert">目前取不到 AD 帳號資料，請確認 radius-manager-ad-status.timer。</div>
+{% elif status_stale %}<div class="notice warning" role="status">AD 帳號資料已超過 30 分鐘沒有更新（最後更新 {{ status_updated }}），可能不是最新。</div>{% endif %}
+{% if denied_accounts %}<div class="notice warning" role="status">目前週期有 {{ denied_accounts }} 個帳號因超過裝置數上限被拒絕，被拒絕的 MAC 標示在下方的裝置 MAC 欄。</div>{% endif %}
+{% include "_group_policy.html" %}
+{% include "_blacklist.html" %}
+<div class="toolbar">
+    <div class="toolbar-title"><h1>AD 帳號</h1><span class="count" id="row-count">共 {{ shown_count }} 筆</span></div>
+    <form method="get" action="{{ base }}/ad" class="status-filter">
+        <input type="hidden" name="q" id="filter-q" value="{{ q }}">
+        <label>帳號狀態
+            <select name="status" data-autosubmit>
+                <option value="all" {{ 'selected' if selected == 'all' }}>全部（{{ counts.all }}）</option>
+                <option value="enabled" {{ 'selected' if selected == 'enabled' }}>啟用（{{ counts.enabled }}）</option>
+                <option value="disabled" {{ 'selected' if selected == 'disabled' }}>停用（{{ counts.disabled }}）</option>
+            </select>
+        </label>
+    </form>
+    <input type="search" id="filter" placeholder="搜尋帳號、單位、姓名或 MAC" aria-label="搜尋帳號、單位、姓名或 MAC" value="{{ q }}">
+    <div class="toolbar-actions"><a class="btn" href="{{ base }}/ad?refresh=1&amp;status={{ selected }}">重新查詢 AD</a></div>
+</div>
+<p class="muted">僅供瀏覽，帳號請到 AD 管理。帳號、單位、姓名與狀態每 5 分鐘從 AD 更新一次{% if status_updated %}（更新於 {{ status_updated }}）{% endif %}；最近登入是指透過 RADIUS 成功登入 Wi-Fi。裝置 MAC 是用這個帳號成功登入過的裝置，最近使用的排在最前面，不受登入紀錄保留筆數影響。週期裝置從 {{ window_start }} 起計算，下次重置 {{ window_end }}（週期請到系統設定調整）；手動重置後，已連線的裝置不會斷線，下次認證時才重新計入。</p>
+<p class="notice warning" id="other-status" role="status" hidden>另有 <span id="other-count"></span> 個帳號符合，但不在目前的狀態篩選內。<a id="other-link" href="{{ base }}/ad?status=all">顯示全部狀態</a></p>
+<div class="table-wrap card">
+    <table id="entries" class="ad-table">
+        <thead>
+            <tr>
+                <th data-sort="account" aria-sort="none">帳號</th>
+                <th data-sort="ou" aria-sort="none">單位</th>
+                <th data-sort="name" aria-sort="none">姓名</th>
+                <th data-sort="state" aria-sort="none">狀態</th>
+                <th data-sort="macs" aria-sort="none">裝置 MAC</th>
+                <th data-sort="today" aria-sort="none">週期裝置</th>
+                <th data-sort="last" aria-sort="none">最近登入</th>
+                <th class="actions-col">操作</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for u in users %}
+            <tr data-account="{{ u.account }}" data-ou="{{ u.ou }}" data-name="{{ u.name }}" data-state="{{ u.state }}" data-last="{{ u.last }}" data-macs="{{ u.macs|map(attribute='mac')|join(' ') }}" data-today="{{ u.today }}" data-search="{{ u.account }} {{ u.ou }} {{ u.name }} {{ u.macs|map(attribute='mac')|join(' ') }} {{ u.denied|map(attribute='mac')|join(' ') }}"{% if selected != 'all' and u.state != selected %} data-other="1" hidden{% endif %}>
+                <td class="strong">{{ u.account }}{% if u.blacklisted %} <span class="badge-off">黑名單</span>{% endif %}</td>
+                <td class="nowrap">{% if u.ou %}{{ u.ou }}{% elif u.state != 'missing' %}<span class="muted">未分類</span>{% endif %}</td>
+                <td>{% if u.name %}{{ u.name }}{% elif u.state != 'missing' %}<span class="muted">未填寫</span>{% endif %}</td>
+                <td class="nowrap">{% if u.state == 'enabled' %}啟用{% elif u.state == 'missing' %}<span class="status-off">已不在 AD</span>{% else %}<span class="status-off">停用</span>{% endif %}</td>
+                <td class="mono">{% for d in u.macs %}<div title="最近使用 {{ d.last }}">{{ d.mac }}</div>{% else %}{% if not u.denied %}<span class="muted">尚無紀錄</span>{% endif %}{% endfor %}{% for d in u.denied %}<div class="status-off" title="本週期被拒絕 {{ d.count }} 次，最後一次 {{ d.last }}">{{ d.mac }}<br>被拒絕</div>{% endfor %}</td>
+                <td class="nowrap">{% if device_limit == 0 or u.exempt %}{{ u.today }}（不限）{% else %}{{ u.today }} / {{ device_limit }}{% endif %}{% if u.today or u.denied %}
+                    <form method="post" action="{{ base }}/device-limit/reset" class="device-reset" data-confirm="要重置 {{ u.account }} 的裝置數嗎？">
+                        <input type="hidden" name="account" value="{{ u.account }}"><input type="hidden" name="status" value="{{ selected }}"><input type="hidden" name="q" class="js-current-q" value="{{ q }}">
+                        <button type="submit" class="btn small">重置</button>
+                    </form>{% endif %}</td>
+                <td class="nowrap">{% if u.last %}{{ u.last }}{% else %}<span class="muted">尚無紀錄</span>{% endif %}</td>
+                <td class="actions-col"><button type="button" class="btn small js-ad-logins">登入紀錄</button>{% if u.state != 'missing' or u.blacklisted %}
+                    <form method="post" action="{{ base }}/blacklist/ad" class="inline-form" data-confirm="{{ '要把 ' ~ u.account ~ ' 移出黑名單嗎？' if u.blacklisted else '要把 ' ~ u.account ~ ' 加入黑名單嗎？加入後這個帳號不能登入 Wi-Fi。' }}">
+                        <input type="hidden" name="action" value="{{ 'remove' if u.blacklisted else 'add' }}"><input type="hidden" name="account" value="{{ u.key }}"><input type="hidden" name="back" value="/ad?status={{ selected }}">
+                        <button type="submit" class="btn small{{ '' if u.blacklisted else ' danger-outline' }}">{{ '移出黑名單' if u.blacklisted else '加入黑名單' }}</button>
+                    </form>{% endif %}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    <p class="empty" id="empty" hidden>找不到符合的資料</p>
+</div>
+{% include "dialogs.html" %}
+{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='app.js') }}"></script>{% endblock %}

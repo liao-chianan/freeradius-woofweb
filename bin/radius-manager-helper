@@ -1,0 +1,996 @@
+#!/usr/bin/python3 -I
+"""Privileged half of radius-manager. The web service runs unprivileged and drops JSON
+requests into a spool directory; a systemd path unit runs this helper as root.
+
+Every request comes from a less privileged process, so all input is validated here
+again. External commands never go through a shell and secrets never go on a command line.
+
+  radius-manager-helper process   handle queued requests
+  radius-manager-helper render    install FreeRADIUS templates (install and upgrade)
+"""
+import datetime
+import hashlib
+import hmac
+import grp
+import ipaddress
+import json
+import os
+import pwd
+import re
+import secrets
+import shutil
+import socket
+import stat
+import string
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.parse
+
+APP_ROOT = os.environ.get('RADMGR_ROOT', '/opt/radius-manager/current')
+SERVICE_USER = 'radmgr'
+STATE_DIR = '/var/lib/radius-manager'
+REQUEST_DIR = f'{STATE_DIR}/requests'
+RESULT_DIR = f'{STATE_DIR}/results'
+ROOT_STATE = '/var/lib/radius-manager-root/state.json'
+RADDB = '/etc/freeradius/3.0'
+CLIENTS = f'{RADDB}/clients.conf'
+EAP_CERT_DIR = f'{RADDB}/certs/radius-manager'
+EAP_CERT = f'{EAP_CERT_DIR}/fullchain.pem'
+EAP_KEY = f'{EAP_CERT_DIR}/privkey.pem'
+LDAP_CONF = f'{RADDB}/ldap-google.conf'
+LDAP_CERT = f'{RADDB}/certs/ldap-client.crt'
+LDAP_KEY = f'{RADDB}/certs/ldap-client.key'
+WEB_TLS_DIR = '/etc/radius-manager/tls'
+SMB_CONF = '/etc/samba/smb.conf'
+PROXY_CONF = f'{RADDB}/proxy.conf'
+# Read by radius-proxy-pap (runs as freerad) for the PAP and GTC methods.
+PROXY_JSON = f'{RADDB}/radius-manager-proxy.json'
+PROXY_REALM = 'radmgr_proxy'
+KRB5_CONF = '/etc/krb5.conf'
+MAX_REQUEST = 1024 * 1024
+RESULT_MAX_AGE = 3600
+ENABLED_MODS = ('adauth_log', 'device_limit', 'failauth_log', 'googleauth_log', 'group_policy', 'ldap_google', 'macauth_log', 'proxy_filter',
+                'proxy_pap', 'proxyauth_log', 'ssid_policy')
+TEMPLATE_MODS = ENABLED_MODS + ('eap', 'files', 'mschap')
+
+DOMAIN_RE = re.compile(r'(?=.{1,253}$)([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}')
+HOST_RE = re.compile(r'(?=.{1,253}$)[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?')
+WORKGROUP_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9-]{0,14}')
+COMPUTER_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9-]{0,14}')
+ACCOUNT_RE = re.compile(r'[^\s"\\/\[\]:;|=,+*?<>@]{1,64}')
+EMAIL_RE = re.compile(r'[^\s@"\\|]{1,64}@[A-Za-z0-9.-]{1,190}')
+SECRET_RE = re.compile(r'[A-Za-z0-9._~-]{8,64}')
+# Written inside single quotes in proxy.conf, where FreeRADIUS does no ${} expansion; ' and \ are refused.
+PROXY_SECRET_RE = re.compile(r"[\x21-\x7e]{6,128}")
+DN_RE = re.compile(r'(dc=[A-Za-z0-9-]{1,63},)*dc=[A-Za-z0-9-]{1,63}', re.I)
+
+
+class Refused(Exception):
+    """The request is invalid or the action failed; the message is shown to the administrator."""
+
+
+class Steps:
+    def __init__(self):
+        self.items = []
+
+    def add(self, name, ok, detail='', ok_detail=''):
+        self.items.append({'name': name, 'ok': bool(ok), 'detail': str(detail if not ok else ok_detail)[:600]})
+        return ok
+
+
+def run(cmd, timeout=60, env=None, stdin=None):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, errors='replace', timeout=timeout, input=stdin,
+                              env={**os.environ, 'LC_ALL': 'C.UTF-8', 'LANG': 'C.UTF-8', **(env or {})})
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(cmd, 124, '', f'timed out after {timeout} seconds')
+    except OSError as e:
+        return subprocess.CompletedProcess(cmd, 127, '', str(e))
+
+
+def output_tail(result, limit=400):
+    text = (result.stderr or result.stdout or '').strip()
+    return text[-limit:]
+
+
+def load_state():
+    try:
+        with open(ROOT_STATE, encoding='utf-8') as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_state(state):
+    os.makedirs(os.path.dirname(ROOT_STATE), mode=0o700, exist_ok=True)
+    write_file(ROOT_STATE, json.dumps(state, indent=1).encode(), 0o600, 'root', 'root')
+
+
+def write_file(path, data, mode, owner='root', group='freerad'):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix='.radmgr-')
+    try:
+        with os.fdopen(fd, 'wb') as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chown(tmp, pwd.getpwnam(owner).pw_uid, grp.getgrnam(group).gr_gid)
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except Exception:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
+def read_bytes(path):
+    try:
+        with open(path, 'rb') as f:
+            return f.read()
+    except FileNotFoundError:
+        return None
+
+
+class Transaction:
+    """Writes config files, then requires `freeradius -C` to pass; the old files come back on any failure."""
+
+    def __init__(self):
+        self.saved = {}
+
+    def write(self, path, data, mode=0o640, owner='root', group='freerad'):
+        if path not in self.saved:
+            self.saved[path] = (read_bytes(path), os.stat(path) if os.path.exists(path) else None)
+        write_file(path, data, mode, owner, group)
+
+    def rollback(self):
+        for path, (old, st) in self.saved.items():
+            if old is None:
+                if os.path.exists(path):
+                    os.unlink(path)
+            else:
+                write_file(path, old, stat.S_IMODE(st.st_mode), pwd.getpwuid(st.st_uid).pw_name, grp.getgrgid(st.st_gid).gr_name)
+
+
+def config_error():
+    result = run(['/usr/sbin/freeradius', '-Cx', '-lstdout'], timeout=60)
+    if result.returncode == 0:
+        return ''
+    lines = [line for line in (result.stdout + result.stderr).splitlines() if 'rror' in line]
+    return '\n'.join(lines[-5:])[:600] or 'freeradius config check failed'
+
+
+def restart_freeradius():
+    result = run(['systemctl', 'restart', 'freeradius'], timeout=60)
+    return result.returncode == 0 and run(['systemctl', 'is-active', '--quiet', 'freeradius']).returncode == 0
+
+
+def commit_freeradius(tx):
+    error = config_error()
+    if error:
+        tx.rollback()
+        raise Refused(f'FreeRADIUS 設定檢查失敗，已還原：{error}')
+    if not restart_freeradius():
+        tx.rollback()
+        restart_freeradius()
+        raise Refused('FreeRADIUS 重新啟動失敗，已還原設定')
+
+
+def text_param(params, key, pattern=None, required=True, maximum=256):
+    value = params.get(key, '')
+    if not isinstance(value, str):
+        raise Refused(f'{key} 格式錯誤')
+    value = value.strip()
+    if not value:
+        if required:
+            raise Refused(f'缺少 {key}')
+        return ''
+    if len(value) > maximum or any(ord(c) < 32 or ord(c) == 127 for c in value):
+        raise Refused(f'{key} 含有不允許的字元')
+    if pattern and not pattern.fullmatch(value):
+        raise Refused(f'{key} 格式錯誤')
+    return value
+
+
+def password_param(params, key, required=True):
+    value = params.get(key, '')
+    if not isinstance(value, str):
+        raise Refused(f'{key} 格式錯誤')
+    if not value:
+        if required:
+            raise Refused(f'缺少 {key}')
+        return ''
+    if len(value) > 256 or any(ord(c) < 32 or ord(c) == 127 for c in value):
+        raise Refused(f'{key} 含有不允許的字元')
+    return value
+
+
+def tcp_open(host, port, timeout=4):
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def x509_summary(pem_path):
+    result = run(['openssl', 'x509', '-in', pem_path, '-noout', '-subject', '-enddate', '-ext', 'subjectAltName'], timeout=10)
+    return result.stdout.strip() if result.returncode == 0 else ''
+
+
+def validate_cert_pair(cert_pem, key_pem):
+    """Returns (certificate, key) as bytes after checking they parse, match and are not expired."""
+    if not cert_pem or not key_pem:
+        raise Refused('請提供憑證與私鑰')
+    with tempfile.TemporaryDirectory(dir='/run') as tmp:
+        cert = os.path.join(tmp, 'cert.pem')
+        key = os.path.join(tmp, 'key.pem')
+        write_file(cert, cert_pem.encode(), 0o600, 'root', 'root')
+        write_file(key, key_pem.encode(), 0o600, 'root', 'root')
+        if run(['openssl', 'x509', '-in', cert, '-noout'], timeout=10).returncode != 0:
+            raise Refused('憑證不是有效的 PEM 格式')
+        if run(['openssl', 'pkey', '-in', key, '-noout', '-passin', 'pass:'], timeout=10).returncode != 0:
+            raise Refused('私鑰不是有效的 PEM 格式，或有設定密碼')
+        cert_pub = run(['openssl', 'x509', '-in', cert, '-noout', '-pubkey'], timeout=10)
+        key_pub = run(['openssl', 'pkey', '-in', key, '-pubout', '-passin', 'pass:'], timeout=10)
+        if cert_pub.stdout.strip() != key_pub.stdout.strip():
+            raise Refused('憑證與私鑰不是同一組')
+        if run(['openssl', 'x509', '-in', cert, '-noout', '-checkend', '86400'], timeout=10).returncode != 0:
+            raise Refused('憑證已過期或將在 24 小時內到期')
+    return cert_pem.encode(), key_pem.encode()
+
+
+def self_signed(fqdn, ips=(), days=825):
+    with tempfile.TemporaryDirectory(dir='/run') as tmp:
+        cert, key = os.path.join(tmp, 'c.pem'), os.path.join(tmp, 'k.pem')
+        san = ','.join([f'DNS:{fqdn}'] + [f'IP:{ip}' for ip in ips])
+        result = run(['openssl', 'req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-nodes', '-sha256', '-days', str(days),
+                      '-keyout', key, '-out', cert, '-subj', f'/CN={fqdn}', '-addext', f'subjectAltName={san}'], timeout=30)
+        if result.returncode != 0:
+            raise Refused(f'無法產生憑證：{output_tail(result)}')
+        return read_bytes(cert), read_bytes(key)
+
+
+def clients_conf(secret, networks, local_secret):
+    lines = ['# Managed by radius-manager. Change it in the web interface: Settings > System.', '',
+             'client localhost {', '\tipaddr = 127.0.0.1', f'\tsecret = {local_secret}', '\trequire_message_authenticator = no', '}', '']
+    for index, network in enumerate(networks):
+        net = ipaddress.ip_network(network, strict=False)
+        lines += [f'client radmgr_{index} {{', f"\t{'ipaddr' if net.version == 4 else 'ipv6addr'} = {net}", f'\tsecret = {secret}', '}', '']
+    return '\n'.join(lines).encode()
+
+
+def action_radius_clients(params):
+    secret = text_param(params, 'secret', SECRET_RE)
+    networks = params.get('networks')
+    if not isinstance(networks, list) or not 1 <= len(networks) <= 50:
+        raise Refused('請提供 1 到 50 個網段')
+    clean = []
+    for network in networks:
+        try:
+            clean.append(str(ipaddress.ip_network(str(network), strict=False)))
+        except ValueError:
+            raise Refused(f'網段格式錯誤：{network}')
+    state = load_state()
+    local = state.setdefault('local_secret', secrets.token_hex(16))
+    tx = Transaction()
+    tx.write(CLIENTS, clients_conf(secret, clean, local))
+    commit_freeradius(tx)
+    save_state(state)
+    return {'message': 'RADIUS 用戶端設定已套用，FreeRADIUS 已重新啟動', 'networks': clean}
+
+
+def action_timezone(params):
+    tz = text_param(params, 'timezone', re.compile(r'[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+){0,2}'), maximum=64)
+    if not os.path.isfile(os.path.join('/usr/share/zoneinfo', tz)):
+        raise Refused(f'不是有效的時區：{tz}')
+    result = run(['timedatectl', 'set-timezone', tz], timeout=20)
+    if result.returncode != 0:
+        raise Refused(f'無法設定時區：{output_tail(result)}')
+    return {'message': f'時區已設為 {tz}'}
+
+
+def mschap_text(workgroup):
+    with open(os.path.join(APP_ROOT, 'freeradius/mods/mschap'), encoding='utf-8') as f:
+        return f.read().replace('@@AD_WORKGROUP@@', workgroup).encode()
+
+
+def samba_text(workgroup, realm, dc, computer):
+    lines = ['# Managed by radius-manager.', '[global]', '   security = ADS', f'   workgroup = {workgroup}', f'   realm = {realm}',
+             '   log file = /var/log/samba/%m.log', '   log level = 1', '   winbind use default domain = true', '   winbind offline logon = false',
+             '   template homedir = /home/%U', '   template shell = /bin/false', '   idmap config * : backend = tdb', '   idmap config * : range = 10000-20000']
+    if computer:
+        lines.insert(5, f'   netbios name = {computer}')
+    if dc:
+        lines.insert(5, f'   password server = {dc}')
+    return ('\n'.join(lines) + '\n').encode()
+
+
+def krb5_text(realm, dc):
+    text = f'[libdefaults]\n\tdefault_realm = {realm}\n\tdns_lookup_realm = false\n\tdns_lookup_kdc = true\n'
+    if dc:
+        text += f'\n[realms]\n\t{realm} = {{\n\t\tkdc = {dc}\n\t\tadmin_server = {dc}\n\t}}\n'
+    return text.encode()
+
+
+def join_hint(text):
+    lowered = text.lower()
+    if 'clock skew' in lowered or 'time' in lowered and 'skew' in lowered:
+        return '主機與 AD 時間差太多，請先校時。'
+    if 'logon failure' in lowered or 'preauthentication failed' in lowered or 'invalid credentials' in lowered:
+        return 'AD 管理帳號或密碼錯誤。'
+    if 'access denied' in lowered or 'insufficient' in lowered:
+        return '這個帳號沒有把電腦加入網域的權限。'
+    if 'no logon servers' in lowered or 'cannot find' in lowered or "couldn't find" in lowered or 'failed to find' in lowered:
+        return '找不到網域控制站：請確認 DNS 指向 AD，或填寫網域控制站位址。'
+    return ''
+
+
+def ad_verify(steps, test_user, test_password):
+    result = run(['net', 'ads', 'testjoin'], timeout=30)
+    if not steps.add('確認主機仍在網域內', result.returncode == 0, output_tail(result)):
+        return False
+    ok = False
+    for _ in range(10):
+        result = run(['wbinfo', '-t'], timeout=20)
+        if result.returncode == 0:
+            ok = True
+            break
+        time.sleep(2)
+    if not steps.add('winbind 與網域控制站的信任關係', ok, '' if ok else output_tail(result)):
+        return False
+    result = run(['wbinfo', '-u'], timeout=60)
+    users = [line for line in result.stdout.splitlines() if line.strip()]
+    steps.add('讀取 AD 帳號', result.returncode == 0, output_tail(result), f'{len(users)} 個帳號')
+    if test_user:
+        line = f"{urllib.parse.quote(test_user, safe='')} {urllib.parse.quote(test_password, safe='')}\n"
+        result = run(['ntlm_auth', '--helper-protocol=squid-2.5-basic'], timeout=20, stdin=line)
+        accepted = result.stdout.strip().startswith('OK')
+        if not steps.add(f'測試帳號 {test_user} 登入', accepted, '' if accepted else '帳號或密碼錯誤，或帳號已停用'):
+            return False
+    return True
+
+
+def action_ad_join(params):
+    realm = text_param(params, 'realm', DOMAIN_RE).upper()
+    workgroup = text_param(params, 'workgroup', WORKGROUP_RE).upper()
+    dc = text_param(params, 'dc', HOST_RE, required=False)
+    computer = text_param(params, 'computer', COMPUTER_RE, required=False).upper()
+    admin_user = text_param(params, 'admin_user', ACCOUNT_RE)
+    admin_password = password_param(params, 'admin_password')
+    test_user = text_param(params, 'test_user', ACCOUNT_RE, required=False)
+    test_password = password_param(params, 'test_password', required=bool(test_user))
+    steps = Steps()
+    target = dc or realm.lower()
+    try:
+        address = socket.getaddrinfo(target, None)[0][4][0]
+    except OSError as e:
+        steps.add(f'解析 {target}', False, f'{e}。主機的 DNS 需要能解析 AD 網域，或填寫網域控制站 IP。')
+        return {'ok': False, 'steps': steps.items}
+    steps.add(f'解析 {target}', True, ok_detail=address)
+    closed = [port for port in (88, 389, 445) if not tcp_open(target, port)]
+    if not steps.add('連線網域控制站（TCP 88、389、445）', not closed, f'連不上：{closed}' if closed else ''):
+        return {'ok': False, 'steps': steps.items}
+    saved = {path: read_bytes(path) for path in (SMB_CONF, KRB5_CONF)}
+    tx = Transaction()
+
+    def undo():
+        for path, data in saved.items():
+            if data is None:
+                if os.path.exists(path):
+                    os.unlink(path)
+            else:
+                write_file(path, data, 0o644, 'root', 'root')
+        run(['systemctl', 'restart', 'winbind'], timeout=30)
+
+    write_file(SMB_CONF, samba_text(workgroup, realm, dc, computer), 0o644, 'root', 'root')
+    write_file(KRB5_CONF, krb5_text(realm, dc), 0o644, 'root', 'root')
+    with tempfile.NamedTemporaryFile('w', dir='/run', prefix='.radmgr-auth-', encoding='utf-8') as auth:
+        os.fchmod(auth.fileno(), 0o600)
+        auth.write(f'username = {admin_user}\npassword = {admin_password}\ndomain = {workgroup}\n')
+        auth.flush()
+        result = run(['net', 'ads', 'join', '--no-dns-updates', '-A', auth.name], timeout=90)
+    if result.returncode != 0:
+        tail = output_tail(result)
+        steps.add('把主機加入網域', False, f'{join_hint(tail)} {tail}'.strip())
+        undo()
+        return {'ok': False, 'steps': steps.items}
+    steps.add('把主機加入網域', True)
+    run(['systemctl', 'enable', 'winbind'], timeout=30)
+    result = run(['systemctl', 'restart', 'winbind'], timeout=60)
+    if not steps.add('啟動 winbind', result.returncode == 0, output_tail(result)):
+        undo()
+        return {'ok': False, 'steps': steps.items}
+    if not ad_verify(steps, test_user, test_password):
+        return {'ok': False, 'steps': steps.items, 'joined': True}
+    state = load_state()
+    state['ad_workgroup'] = workgroup
+    tx.write(f'{RADDB}/mods-available/mschap', mschap_text(workgroup))
+    try:
+        commit_freeradius(tx)
+    except Refused as e:
+        steps.add('套用到 FreeRADIUS', False, e)
+        return {'ok': False, 'steps': steps.items, 'joined': True}
+    steps.add('套用到 FreeRADIUS', True)
+    save_state(state)
+    run(['systemctl', 'enable', '--now', 'radius-manager-ad-status.timer', 'radius-manager-ad-status.path'], timeout=30)
+    run(['systemctl', 'start', '--no-block', 'radius-manager-ad-status.service'], timeout=15)
+    return {'ok': True, 'steps': steps.items}
+
+
+def action_ad_test(params):
+    test_user = text_param(params, 'test_user', ACCOUNT_RE, required=False)
+    test_password = password_param(params, 'test_password', required=bool(test_user))
+    steps = Steps()
+    return {'ok': ad_verify(steps, test_user, test_password), 'steps': steps.items}
+
+
+def action_ad_disable(params):
+    run(['systemctl', 'disable', '--now', 'radius-manager-ad-status.timer', 'radius-manager-ad-status.path'], timeout=30)
+    run(['systemctl', 'disable', '--now', 'winbind'], timeout=30)
+    return {'ok': True, 'message': 'AD 帳號驗證已停用。AD 上的電腦帳號不會被刪除，需要時請由 AD 管理者移除。'}
+
+
+def google_conf_text(identity, password, base_dn):
+    return f'identity = "{identity}"\npassword = "{password}"\nbase_dn = "{base_dn}"\n'.encode()
+
+
+def placeholder_ldap():
+    return google_conf_text('not-configured', secrets.token_hex(16), 'dc=not,dc=configured')
+
+
+def ldap_search(cert, key, args, identity=None, password=None, timeout=25):
+    env = {'LDAPTLS_CERT': cert, 'LDAPTLS_KEY': key, 'LDAPTLS_REQCERT': 'demand'}
+    with tempfile.NamedTemporaryFile('w', dir='/run', prefix='.radmgr-ldap-', encoding='utf-8') as pw:
+        os.fchmod(pw.fileno(), 0o600)
+        cmd = ['ldapsearch', '-LLL', '-x', '-o', 'nettimeout=10', '-o', 'ldif-wrap=no', '-H', 'ldaps://ldap.google.com:636']
+        if identity:
+            pw.write(password)
+            pw.flush()
+            cmd += ['-D', identity, '-y', pw.name]
+        return run(cmd + args, timeout=timeout, env=env)
+
+
+def google_verify(steps, cert, key, identity, password, base_dn, test_email, test_password):
+    if not steps.add('連線 ldap.google.com:636', tcp_open('ldap.google.com', 636, 6), '主機無法連到 ldap.google.com:636'):
+        return False
+    result = ldap_search(cert, key, ['-z', '1', '-b', base_dn, '(objectClass=person)', 'dn'], identity, password)
+    if result.returncode not in (0, 4):
+        hint = '用戶端憑證或存取憑證有誤，或 LDAP 用戶端未開啟。' if result.returncode in (49, 13, 8, 1) else ''
+        steps.add('以憑證查詢 Google 目錄', False, f'{hint} {output_tail(result)}'.strip())
+        return False
+    if not steps.add('以憑證查詢 Google 目錄', 'dn:' in result.stdout or 'dn::' in result.stdout,
+                     '' if 'dn:' in result.stdout else '查得到伺服器但沒有任何使用者，請檢查 Base DN 與 LDAP 用戶端的讀取權限。'):
+        return False
+    if test_email:
+        escaped = re.sub(r'([\\*()\0])', lambda m: '\\%02x' % ord(m.group(1)), test_email)
+        result = ldap_search(cert, key, ['-b', base_dn, f'(mail={escaped})', 'dn'], identity, password)
+        match = re.search(r'^(dn::? .+)$', result.stdout, re.M)
+        if not steps.add(f'查詢測試帳號 {test_email}', bool(match), '' if match else '找不到這個帳號，或不在 LDAP 用戶端的讀取範圍內'):
+            return False
+        dn = match.group(1)
+        if dn.startswith('dn:: '):
+            import base64
+            dn = base64.b64decode(dn[5:]).decode('utf-8', 'replace')
+        else:
+            dn = dn[4:]
+        result = ldap_search(cert, key, ['-s', 'base', '-b', '', '(objectClass=*)', 'dn'], dn, test_password)
+        if not steps.add(f'測試帳號 {test_email} 登入', result.returncode != 49, '帳號或密碼錯誤，或帳號不在「驗證使用者憑證」的範圍內' if result.returncode == 49 else ''):
+            return False
+    return True
+
+
+def action_google_configure(params):
+    identity = text_param(params, 'identity', re.compile(r'[^"\\$%\s]{1,128}'))
+    password = text_param(params, 'password', re.compile(r'[^"\\$%\s]{1,128}'))
+    base_dn = text_param(params, 'base_dn', DN_RE)
+    test_email = text_param(params, 'test_email', EMAIL_RE, required=False)
+    test_password = password_param(params, 'test_password', required=bool(test_email))
+    cert_pem, key_pem = validate_cert_pair(params.get('cert_pem', ''), params.get('key_pem', ''))
+    steps = Steps()
+    with tempfile.TemporaryDirectory(dir='/run') as tmp:
+        cert, key = os.path.join(tmp, 'c.crt'), os.path.join(tmp, 'c.key')
+        write_file(cert, cert_pem, 0o600, 'root', 'root')
+        write_file(key, key_pem, 0o600, 'root', 'root')
+        if not google_verify(steps, cert, key, identity, password, base_dn, test_email, test_password):
+            return {'ok': False, 'steps': steps.items}
+    tx = Transaction()
+    tx.write(LDAP_CONF, google_conf_text(identity, password, base_dn))
+    tx.write(LDAP_CERT, cert_pem)
+    tx.write(LDAP_KEY, key_pem)
+    try:
+        commit_freeradius(tx)
+    except Refused as e:
+        steps.add('套用到 FreeRADIUS', False, e)
+        return {'ok': False, 'steps': steps.items}
+    steps.add('套用到 FreeRADIUS', True)
+    run(['systemctl', 'start', '--no-block', 'radius-manager-google-dir.service'], timeout=15)
+    return {'ok': True, 'steps': steps.items, 'cert_expires': x509_summary(LDAP_CERT)}
+
+
+def action_google_test(params):
+    test_email = text_param(params, 'test_email', EMAIL_RE, required=False)
+    test_password = password_param(params, 'test_password', required=bool(test_email))
+    text = (read_bytes(LDAP_CONF) or b'').decode()
+    values = dict(re.findall(r'^(identity|password|base_dn) = "(.*)"$', text, re.M))
+    if len(values) != 3 or values['identity'] == 'not-configured':
+        raise Refused('尚未設定 Google 帳號驗證')
+    steps = Steps()
+    ok = google_verify(steps, LDAP_CERT, LDAP_KEY, values['identity'], values['password'], values['base_dn'], test_email, test_password)
+    return {'ok': ok, 'steps': steps.items, 'cert_expires': x509_summary(LDAP_CERT)}
+
+
+def action_google_disable(params):
+    cert, key = self_signed('not-configured.invalid', days=3650)
+    tx = Transaction()
+    tx.write(LDAP_CONF, placeholder_ldap())
+    tx.write(LDAP_CERT, cert)
+    tx.write(LDAP_KEY, key)
+    commit_freeradius(tx)
+    # 沒有設定時會刪除目錄快取，裡面有使用者姓名與 email
+    run(['systemctl', 'start', '--no-block', 'radius-manager-google-dir.service'], timeout=15)
+    return {'ok': True, 'message': 'Google 帳號驗證已停用，憑證與存取憑證已刪除'}
+
+
+def action_eap_cert(params):
+    mode = params.get('mode')
+    if mode == 'self_signed':
+        fqdn = text_param(params, 'fqdn', DOMAIN_RE)
+        cert, key = self_signed(fqdn)
+    elif mode == 'upload':
+        cert, key = validate_cert_pair(params.get('cert_pem', ''), params.get('key_pem', ''))
+    else:
+        raise Refused('不支援的憑證方式')
+    tx = Transaction()
+    tx.write(EAP_CERT, cert)
+    tx.write(EAP_KEY, key)
+    commit_freeradius(tx)
+    return {'ok': True, 'summary': x509_summary(EAP_CERT)}
+
+
+def action_eap_cert_info(params):
+    return {'ok': True, 'summary': x509_summary(EAP_CERT)}
+
+
+def action_web_cert(params):
+    cert, key = validate_cert_pair(params.get('cert_pem', ''), params.get('key_pem', ''))
+    write_file(f'{WEB_TLS_DIR}/cert.pem', cert, 0o640, 'root', SERVICE_USER)
+    write_file(f'{WEB_TLS_DIR}/key.pem', key, 0o640, 'root', SERVICE_USER)
+    # Answer the browser first; the service restarts a few seconds later.
+    run(['systemd-run', '--on-active=3', '--unit=radius-manager-web-cert-restart', 'systemctl', 'restart', 'radius-manager'], timeout=15)
+    return {'ok': True, 'message': '管理介面憑證已更新，服務即將重新啟動，請稍後重新整理'}
+
+
+def _md4(data):
+    """MD4（RFC 1320）。OpenSSL 3 預設不提供 MD4，MS-CHAPv2 的密碼雜湊需要它。"""
+    def rol(x, n):
+        return ((x << n) | (x >> (32 - n))) & 0xffffffff
+    msg = bytearray(data) + b'\x80'
+    msg += b'\x00' * ((56 - len(msg) % 64) % 64) + struct.pack('<Q', len(data) * 8)
+    h = [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476]
+    for off in range(0, len(msg), 64):
+        x = struct.unpack('<16I', msg[off:off + 64])
+        a, b, c, d = h
+        for i in range(16):
+            k, s = i, (3, 7, 11, 19)[i % 4]
+            a, b, c, d = d, rol((a + ((b & c) | (~b & d)) + x[k]) & 0xffffffff, s), b, c
+        for i in range(16):
+            k, s = (i % 4) * 4 + i // 4, (3, 5, 9, 13)[i % 4]
+            a, b, c, d = d, rol((a + ((b & c) | (b & d) | (c & d)) + x[k] + 0x5a827999) & 0xffffffff, s), b, c
+        for i in range(16):
+            k, s = (0, 8, 4, 12, 2, 10, 6, 14, 1, 9, 5, 13, 3, 11, 7, 15)[i], (3, 9, 11, 15)[i % 4]
+            a, b, c, d = d, rol((a + (b ^ c ^ d) + x[k] + 0x6ed9eba1) & 0xffffffff, s), b, c
+        h = [(v + n) & 0xffffffff for v, n in zip(h, (a, b, c, d))]
+    return struct.pack('<4I', *h)
+
+
+_PC1 = (57, 49, 41, 33, 25, 17, 9, 1, 58, 50, 42, 34, 26, 18, 10, 2, 59, 51, 43, 35, 27, 19, 11, 3, 60, 52, 44, 36,
+        63, 55, 47, 39, 31, 23, 15, 7, 62, 54, 46, 38, 30, 22, 14, 6, 61, 53, 45, 37, 29, 21, 13, 5, 28, 20, 12, 4)
+_PC2 = (14, 17, 11, 24, 1, 5, 3, 28, 15, 6, 21, 10, 23, 19, 12, 4, 26, 8, 16, 7, 27, 20, 13, 2,
+        41, 52, 31, 37, 47, 55, 30, 40, 51, 45, 33, 48, 44, 49, 39, 56, 34, 53, 46, 42, 50, 36, 29, 32)
+_IP = (58, 50, 42, 34, 26, 18, 10, 2, 60, 52, 44, 36, 28, 20, 12, 4, 62, 54, 46, 38, 30, 22, 14, 6, 64, 56, 48, 40, 32, 24, 16, 8,
+       57, 49, 41, 33, 25, 17, 9, 1, 59, 51, 43, 35, 27, 19, 11, 3, 61, 53, 45, 37, 29, 21, 13, 5, 63, 55, 47, 39, 31, 23, 15, 7)
+_FP = tuple(_IP.index(i) + 1 for i in range(1, 65))
+_E = (32, 1, 2, 3, 4, 5, 4, 5, 6, 7, 8, 9, 8, 9, 10, 11, 12, 13, 12, 13, 14, 15, 16, 17,
+      16, 17, 18, 19, 20, 21, 20, 21, 22, 23, 24, 25, 24, 25, 26, 27, 28, 29, 28, 29, 30, 31, 32, 1)
+_P = (16, 7, 20, 21, 29, 12, 28, 17, 1, 15, 23, 26, 5, 18, 31, 10, 2, 8, 24, 14, 32, 27, 3, 9, 19, 13, 30, 6, 22, 11, 4, 25)
+_SHIFTS = (1, 1, 2, 2, 2, 2, 2, 2, 1, 2, 2, 2, 2, 2, 2, 1)
+_S = (
+    (14, 4, 13, 1, 2, 15, 11, 8, 3, 10, 6, 12, 5, 9, 0, 7, 0, 15, 7, 4, 14, 2, 13, 1, 10, 6, 12, 11, 9, 5, 3, 8,
+     4, 1, 14, 8, 13, 6, 2, 11, 15, 12, 9, 7, 3, 10, 5, 0, 15, 12, 8, 2, 4, 9, 1, 7, 5, 11, 3, 14, 10, 0, 6, 13),
+    (15, 1, 8, 14, 6, 11, 3, 4, 9, 7, 2, 13, 12, 0, 5, 10, 3, 13, 4, 7, 15, 2, 8, 14, 12, 0, 1, 10, 6, 9, 11, 5,
+     0, 14, 7, 11, 10, 4, 13, 1, 5, 8, 12, 6, 9, 3, 2, 15, 13, 8, 10, 1, 3, 15, 4, 2, 11, 6, 7, 12, 0, 5, 14, 9),
+    (10, 0, 9, 14, 6, 3, 15, 5, 1, 13, 12, 7, 11, 4, 2, 8, 13, 7, 0, 9, 3, 4, 6, 10, 2, 8, 5, 14, 12, 11, 15, 1,
+     13, 6, 4, 9, 8, 15, 3, 0, 11, 1, 2, 12, 5, 10, 14, 7, 1, 10, 13, 0, 6, 9, 8, 7, 4, 15, 14, 3, 11, 5, 2, 12),
+    (7, 13, 14, 3, 0, 6, 9, 10, 1, 2, 8, 5, 11, 12, 4, 15, 13, 8, 11, 5, 6, 15, 0, 3, 4, 7, 2, 12, 1, 10, 14, 9,
+     10, 6, 9, 0, 12, 11, 7, 13, 15, 1, 3, 14, 5, 2, 8, 4, 3, 15, 0, 6, 10, 1, 13, 8, 9, 4, 5, 11, 12, 7, 2, 14),
+    (2, 12, 4, 1, 7, 10, 11, 6, 8, 5, 3, 15, 13, 0, 14, 9, 14, 11, 2, 12, 4, 7, 13, 1, 5, 0, 15, 10, 3, 9, 8, 6,
+     4, 2, 1, 11, 10, 13, 7, 8, 15, 9, 12, 5, 6, 3, 0, 14, 11, 8, 12, 7, 1, 14, 2, 13, 6, 15, 0, 9, 10, 4, 5, 3),
+    (12, 1, 10, 15, 9, 2, 6, 8, 0, 13, 3, 4, 14, 7, 5, 11, 10, 15, 4, 2, 7, 12, 9, 5, 6, 1, 13, 14, 0, 11, 3, 8,
+     9, 14, 15, 5, 2, 8, 12, 3, 7, 0, 4, 10, 1, 13, 11, 6, 4, 3, 2, 12, 9, 5, 15, 10, 11, 14, 1, 7, 6, 0, 8, 13),
+    (4, 11, 2, 14, 15, 0, 8, 13, 3, 12, 9, 7, 5, 10, 6, 1, 13, 0, 11, 7, 4, 9, 1, 10, 14, 3, 5, 12, 2, 15, 8, 6,
+     1, 4, 11, 13, 12, 3, 7, 14, 10, 15, 6, 8, 0, 5, 9, 2, 6, 11, 13, 8, 1, 4, 10, 7, 9, 5, 0, 15, 14, 2, 3, 12),
+    (13, 2, 8, 4, 6, 15, 11, 1, 10, 9, 3, 14, 5, 0, 12, 7, 1, 15, 13, 8, 10, 3, 7, 4, 12, 5, 6, 11, 0, 14, 9, 2,
+     7, 11, 4, 1, 9, 12, 14, 2, 0, 6, 10, 13, 15, 3, 5, 8, 2, 1, 14, 7, 4, 10, 8, 13, 15, 12, 9, 0, 3, 5, 6, 11))
+
+
+def _permute(value, table, width):
+    out = 0
+    for pos in table:
+        out = (out << 1) | ((value >> (width - pos)) & 1)
+    return out
+
+
+def _des_encrypt(key8, block8):
+    """單一 DES-ECB 加密一個區塊，只供 MS-CHAPv2 計算 NT-Response。"""
+    k = _permute(int.from_bytes(key8, 'big'), _PC1, 64)
+    c, d = k >> 28, k & 0xfffffff
+    subkeys = []
+    for shift in _SHIFTS:
+        c = ((c << shift) | (c >> (28 - shift))) & 0xfffffff
+        d = ((d << shift) | (d >> (28 - shift))) & 0xfffffff
+        subkeys.append(_permute((c << 28) | d, _PC2, 56))
+    block = _permute(int.from_bytes(block8, 'big'), _IP, 64)
+    left, right = block >> 32, block & 0xffffffff
+    for subkey in subkeys:
+        x = _permute(right, _E, 32) ^ subkey
+        s = 0
+        for i in range(8):
+            six = (x >> (42 - 6 * i)) & 0x3f
+            row, col = ((six & 0x20) >> 4) | (six & 1), (six >> 1) & 0xf
+            s = (s << 4) | _S[i][row * 16 + col]
+        left, right = right, left ^ _permute(s, _P, 32)
+    return _permute((right << 32) | left, _FP, 64).to_bytes(8, 'big')
+
+
+def _des_key(seven):
+    bits = int.from_bytes(seven, 'big')
+    return bytes((((bits >> (56 - 7 * (i + 1))) & 0x7f) << 1) for i in range(8))
+
+
+def mschapv2_response(username, password, auth_challenge, peer_challenge):
+    """RFC 2759：回傳 24 bytes 的 NT-Response。"""
+    challenge = hashlib.sha1(peer_challenge + auth_challenge + username.encode()).digest()[:8]
+    pw_hash = _md4(password.encode('utf-16-le')) + b'\x00' * 5
+    return b''.join(_des_encrypt(_des_key(pw_hash[i:i + 7]), challenge) for i in (0, 7, 14))
+
+
+def proxy_conf_text(proxy):
+    """proxy.conf is owned by radius-manager. Without an external server the realm does not exist at all,
+    so nothing can be proxied by accident; the stock example.com realm is dropped as well."""
+    lines = ['# Managed by radius-manager. Change it in the web interface: Proxy.', '',
+             'proxy server {', '\tdefault_fallback = no', '}', '', 'realm LOCAL {', '}', '']
+    if proxy:
+        family = 'ipv6addr' if ':' in proxy['server'] else 'ipaddr'
+        lines += [f'home_server {PROXY_REALM} {{', '\ttype = auth', f"\t{family} = {proxy['server']}", f"\tport = {proxy['port']}",
+                  f"\tsecret = '{proxy['secret']}'", '\tresponse_window = 10', '\tzombie_period = 20', '\trevive_interval = 30',
+                  '\tstatus_check = none', '}', '',
+                  f'home_server_pool {PROXY_REALM} {{', '\ttype = fail-over', f'\thome_server = {PROXY_REALM}', '}', '',
+                  f'realm {PROXY_REALM} {{', f'\tauth_pool = {PROXY_REALM}', '\tnostrip', '}', '']
+    return '\n'.join(lines).encode()
+
+
+def proxy_params(params, state):
+    server = text_param(params, 'server', maximum=253)
+    try:
+        server = str(ipaddress.ip_address(server))
+    except ValueError:
+        if not HOST_RE.fullmatch(server) or '..' in server:
+            raise Refused('外部 RADIUS 位址格式錯誤')
+    port = params.get('port')
+    if not isinstance(port, int) or not 1 <= port <= 65535:
+        raise Refused('連接埠必須是 1 到 65535')
+    secret = params.get('secret') or ''
+    if not secret:
+        old = state.get('proxy')
+        if not old:
+            raise Refused('請輸入共用金鑰')
+        secret = old['secret']
+    if not isinstance(secret, str) or not PROXY_SECRET_RE.fullmatch(secret) or "'" in secret or '\\' in secret:
+        raise Refused("共用金鑰必須是 6 到 128 個英數或符號，不可含空白、' 或 \\")
+    return {'server': server, 'port': port, 'secret': secret}
+
+
+def radius_attr(kind, value):
+    return bytes((kind, len(value) + 2)) + value
+
+
+def ms_attr(kind, value):
+    sub = bytes((kind, len(value) + 2)) + value
+    return radius_attr(26, struct.pack('>I', 311) + sub)
+
+
+def proxy_probe(proxy, username, password, timeout=6):
+    """Sends the same kind of request FreeRADIUS proxies (plain MS-CHAPv2) and reports what came back."""
+    secret = proxy['secret'].encode()
+    auth_challenge, peer_challenge, authenticator = os.urandom(16), os.urandom(16), os.urandom(16)
+    ident = secrets.randbelow(256)
+    nt_response = mschapv2_response(username, password, auth_challenge, peer_challenge)
+    attrs = (radius_attr(1, username.encode()) + radius_attr(32, b'radius-manager-test') +
+             ms_attr(11, auth_challenge) + ms_attr(25, bytes((ident, 0)) + peer_challenge + bytes(8) + nt_response) +
+             radius_attr(80, bytes(16)))
+    packet_id = secrets.randbelow(256)
+    packet = bytearray(struct.pack('>BBH', 1, packet_id, 20 + len(attrs)) + authenticator + attrs)
+    packet[-16:] = hmac.new(secret, bytes(packet), 'md5').digest()
+    try:
+        addr = socket.getaddrinfo(proxy['server'], proxy['port'], type=socket.SOCK_DGRAM)[0]
+    except OSError:
+        return 'dns', ''
+    with socket.socket(addr[0], socket.SOCK_DGRAM) as sock:
+        sock.settimeout(timeout)
+        deadline = time.time() + timeout
+        for _ in range(3):
+            sock.sendto(bytes(packet), addr[4])
+            try:
+                while True:
+                    sock.settimeout(max(0.1, min(2, deadline - time.time())))
+                    reply, _ = sock.recvfrom(4096)
+                    if len(reply) >= 20 and reply[1] == packet_id:
+                        break
+                break
+            except socket.timeout:
+                if time.time() >= deadline:
+                    return 'timeout', ''
+        else:
+            return 'timeout', ''
+    code, _, length = struct.unpack('>BBH', reply[:4])
+    expected = hashlib.md5(reply[:4] + authenticator + reply[20:length] + secret).digest()
+    if not hmac.compare_digest(expected, reply[4:20]):
+        return 'badsecret', ''
+    messages, pos = [], 20
+    while pos + 2 <= length:
+        kind, size = reply[pos], reply[pos + 1]
+        if size < 2:
+            break
+        value = reply[pos + 2:pos + size]
+        if kind == 18:
+            messages.append(value.decode('utf-8', 'replace'))
+        elif kind == 26 and len(value) > 6 and value[:4] == struct.pack('>I', 311) and value[4] == 2:
+            messages.append('MS-CHAP-Error ' + value[7:].decode('ascii', 'replace'))
+        pos += size
+    detail = '；'.join(m.strip() for m in messages if m.strip())[:300]
+    return {2: 'accept', 3: 'reject', 11: 'challenge'}.get(code, f'code{code}'), detail
+
+
+def pap_probe(proxy, username, password):
+    import importlib.machinery
+    client = importlib.machinery.SourceFileLoader('radius_proxy_pap', '/usr/local/sbin/radius-proxy-pap').load_module()
+    return client.pap_request(proxy['server'], proxy['port'], proxy['secret'], username, password)
+
+
+def proxy_test_steps(steps, proxy, username, password, method='MSCHAPv2'):
+    if not username:
+        username, password = f'radius-manager-test-{secrets.token_hex(4)}', secrets.token_hex(12)
+        tested = '測試用的隨機帳號'
+    else:
+        tested = f'測試帳號 {username} '
+    pap = method != 'MSCHAPv2'
+    result, detail = pap_probe(proxy, username, password) if pap else proxy_probe(proxy, username, password)
+    kind = 'PAP' if pap else 'MS-CHAPv2'
+    tested = f'{tested}（{kind}）'
+    where = f"{proxy['server']}:{proxy['port']}"
+    if result == 'dns':
+        return steps.add(f'解析 {where}', False, '無法解析外部 RADIUS 的主機名稱')
+    if result == 'timeout':
+        return steps.add(f'連線 {where}', False, '沒有回應。請確認位址與連接埠、防火牆，外部 RADIUS 已把本機 IP 加入用戶端，以及共用金鑰正確'
+                                                     '（多數伺服器收到錯誤金鑰的封包時不會回應）')
+    if result == 'badsecret':
+        return steps.add(f'連線 {where}', False, '有回應，但回應的驗證碼不符，共用金鑰錯誤')
+    steps.add(f'連線 {where}', True, ok_detail='有回應，共用金鑰正確')
+    extra = f'（{detail}）' if detail else ''
+    if result == 'accept':
+        return steps.add(f'以{tested}驗證', True, ok_detail='外部 RADIUS 接受' + extra)
+    if result == 'reject':
+        if tested.startswith('測試用'):
+            return steps.add(f'以{tested}驗證', True, ok_detail='外部 RADIUS 回應拒絕，這是預期結果' + extra)
+        if pap:
+            return steps.add(f'以{tested}驗證', False, '外部 RADIUS 拒絕：帳號或密碼錯誤，或外部不接受 PAP 驗證' + extra)
+        return steps.add(f'以{tested}驗證', False, '外部 RADIUS 拒絕：帳號或密碼錯誤，或外部不支援 MS-CHAPv2（例如帳號存在 LDAP 或 Google，'
+                                                  '只能驗明文密碼）。可把內層改成 PAP 或 GTC 再測一次' + extra)
+    return steps.add(f'以{tested}驗證', False, f'外部 RADIUS 回應了無法處理的封包（{result}）{extra}')
+
+
+PROXY_METHODS = {'MSCHAPv2', 'PAP', 'GTC'}
+
+
+def proxy_method(params):
+    method = params.get('inner', 'MSCHAPv2')
+    if method not in PROXY_METHODS:
+        raise Refused('內層驗證方式錯誤')
+    return method
+
+
+def proxy_json(proxy):
+    return json.dumps(proxy or {}, indent=1).encode()
+
+
+def proxy_test_account(params):
+    username = text_param(params, 'test_user', re.compile(r'[^\s"\\]{1,128}'), required=False)
+    password = password_param(params, 'test_password', required=bool(username))
+    return username, password
+
+
+def action_proxy_configure(params):
+    state = load_state()
+    proxy = proxy_params(params, state)
+    username, password = proxy_test_account(params)
+    method = proxy_method(params)
+    steps = Steps()
+    if not proxy_test_steps(steps, proxy, username, password, method) and not params.get('force'):
+        return {'ok': False, 'steps': steps.items}
+    conf = proxy_conf_text(proxy)
+    if read_bytes(PROXY_CONF) == conf and read_bytes(PROXY_JSON) == proxy_json(proxy):
+        # Only the method changed: that lives in the web service's proxy-filter.json and needs no restart.
+        steps.add('套用到 FreeRADIUS', True, ok_detail='外部 RADIUS 設定沒有變更，不需重新啟動 FreeRADIUS')
+    else:
+        tx = Transaction()
+        tx.write(PROXY_CONF, conf)
+        tx.write(PROXY_JSON, proxy_json(proxy))
+        try:
+            commit_freeradius(tx)
+        except Refused as e:
+            steps.add('套用到 FreeRADIUS', False, e)
+            return {'ok': False, 'steps': steps.items}
+        steps.add('套用到 FreeRADIUS', True, ok_detail='FreeRADIUS 已重新啟動')
+    state['proxy'] = proxy
+    save_state(state)
+    return {'ok': True, 'steps': steps.items, 'server': proxy['server'], 'port': proxy['port']}
+
+
+def action_proxy_test(params):
+    proxy = load_state().get('proxy')
+    if not proxy:
+        raise Refused('尚未設定外部 RADIUS')
+    username, password = proxy_test_account(params)
+    steps = Steps()
+    ok = proxy_test_steps(steps, proxy, username, password, proxy_method(params))
+    return {'ok': ok, 'steps': steps.items}
+
+
+def action_proxy_disable(params):
+    state = load_state()
+    tx = Transaction()
+    tx.write(PROXY_CONF, proxy_conf_text(None))
+    tx.write(PROXY_JSON, proxy_json(None))
+    commit_freeradius(tx)
+    state.pop('proxy', None)
+    save_state(state)
+    return {'ok': True, 'message': '外部 RADIUS 已停用，共用金鑰已刪除；Proxy SSID 的登入會全部被拒絕'}
+
+
+ACTIONS = {
+    'radius_clients': action_radius_clients, 'timezone': action_timezone,
+    'ad_join': action_ad_join, 'ad_test': action_ad_test, 'ad_disable': action_ad_disable,
+    'google_configure': action_google_configure, 'google_test': action_google_test, 'google_disable': action_google_disable,
+    'eap_cert': action_eap_cert, 'eap_cert_info': action_eap_cert_info, 'web_cert': action_web_cert,
+    'proxy_configure': action_proxy_configure, 'proxy_test': action_proxy_test, 'proxy_disable': action_proxy_disable,
+}
+
+
+def write_result(request_id, result):
+    write_file(os.path.join(RESULT_DIR, f'{request_id}.json'), json.dumps(result, ensure_ascii=False).encode(), 0o640, 'root', SERVICE_USER)
+
+
+def handle(path, name):
+    request_id = name[:-5]
+    uid = pwd.getpwnam(SERVICE_USER).pw_uid
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != uid or st.st_size > MAX_REQUEST:
+            write_result(request_id, {'ok': False, 'error': '請求不合法'})
+            return
+        with os.fdopen(os.dup(fd), encoding='utf-8') as f:
+            data = json.load(f)
+    finally:
+        os.close(fd)
+        # Requests can hold passwords: gone before anything else happens.
+        os.unlink(path)
+    action = ACTIONS.get(data.get('action'))
+    if action is None or not isinstance(data.get('params'), dict):
+        write_result(request_id, {'ok': False, 'error': '不支援的操作'})
+        return
+    try:
+        result = action(data['params'])
+        result.setdefault('ok', True)
+    except Refused as e:
+        result = {'ok': False, 'error': str(e)}
+    except Exception as e:
+        print(f'{data.get("action")} failed: {type(e).__name__}', file=sys.stderr)
+        result = {'ok': False, 'error': f'內部錯誤（{type(e).__name__}），請查看 journalctl -u radius-manager-helper'}
+    write_result(request_id, result)
+
+
+def process():
+    now = time.time()
+    for name in os.listdir(RESULT_DIR):
+        path = os.path.join(RESULT_DIR, name)
+        if now - os.lstat(path).st_mtime > RESULT_MAX_AGE:
+            os.unlink(path)
+    for _ in range(100):
+        names = sorted(n for n in os.listdir(REQUEST_DIR) if re.fullmatch(r'[0-9a-f]{32}\.json', n))
+        if not names:
+            return
+        for name in names:
+            try:
+                handle(os.path.join(REQUEST_DIR, name), name)
+            except (OSError, ValueError) as e:
+                print(f'bad request {name}: {type(e).__name__}', file=sys.stderr)
+                write_result(name[:-5], {'ok': False, 'error': '請求不合法'})
+                path = os.path.join(REQUEST_DIR, name)
+                if os.path.lexists(path):
+                    os.unlink(path)
+
+
+def ensure_setting(text, name, value):
+    """Sets `name = value` on the first uncommented top-level or section line, otherwise adds it."""
+    pattern = re.compile(rf'^([ \t]*){re.escape(name)}[ \t]*=.*$', re.M)
+    if pattern.search(text):
+        return pattern.sub(rf'\g<1>{name} = {value}', text, count=1)
+    return text
+
+
+def render():
+    """Copies shipped templates over the package defaults. Site secrets and uploads are never touched."""
+    state = load_state()
+    templates = os.path.join(APP_ROOT, 'freeradius')
+    workgroup = state.get('ad_workgroup', 'WORKGROUP')
+    for name in ('default', 'inner-tunnel'):
+        write_file(f'{RADDB}/sites-available/{name}', read_bytes(f'{templates}/sites/{name}'), 0o640)
+    for name in TEMPLATE_MODS:
+        data = mschap_text(workgroup) if name == 'mschap' else read_bytes(f'{templates}/mods/{name}')
+        write_file(f'{RADDB}/mods-available/{name}', data, 0o640)
+    for name in ENABLED_MODS:
+        link = f'{RADDB}/mods-enabled/{name}'
+        if not os.path.lexists(link):
+            os.symlink(f'../mods-available/{name}', link)
+    write_file(f'{RADDB}/policy.d/mac-address.conf', read_bytes(f'{templates}/policy/mac-address.conf'), 0o640)
+    radiusd = read_bytes(f'{RADDB}/radiusd.conf').decode()
+    radiusd = ensure_setting(radiusd, 'auth', 'yes')
+    # TTLS/PAP and GTC passwords are cleartext at this point: they must never reach the log.
+    radiusd = ensure_setting(radiusd, 'auth_badpass', 'no')
+    radiusd = ensure_setting(radiusd, 'auth_goodpass', 'no')
+    if not re.search(r'^[ \t]*correct_escapes[ \t]*=', radiusd, re.M):
+        radiusd = radiusd.replace('\nprefix = ', '\ncorrect_escapes = true\nprefix = ', 1)
+    write_file(f'{RADDB}/radiusd.conf', radiusd.encode(), 0o640)
+    if not os.path.exists(CLIENTS) or b'Managed by radius-manager' not in read_bytes(CLIENTS):
+        local = state.setdefault('local_secret', secrets.token_hex(16))
+        write_file(CLIENTS, clients_conf('', [], local), 0o640)
+    if not os.path.exists(EAP_CERT):
+        os.makedirs(EAP_CERT_DIR, exist_ok=True)
+        cert, key = self_signed(socket.getfqdn() if DOMAIN_RE.fullmatch(socket.getfqdn()) else 'radius.invalid')
+        write_file(EAP_CERT, cert, 0o640)
+        write_file(EAP_KEY, key, 0o640)
+    shutil.chown(EAP_CERT_DIR, 'root', 'freerad')
+    os.chmod(EAP_CERT_DIR, 0o750)
+    if not os.path.exists(LDAP_CONF) or not os.path.exists(LDAP_CERT):
+        cert, key = self_signed('not-configured.invalid', days=3650)
+        write_file(LDAP_CONF, placeholder_ldap(), 0o640)
+        write_file(LDAP_CERT, cert, 0o640)
+        write_file(LDAP_KEY, key, 0o640)
+    if not os.path.exists(PROXY_CONF) or b'Managed by radius-manager' not in read_bytes(PROXY_CONF):
+        if os.path.exists(PROXY_CONF) and not os.path.exists(PROXY_CONF + '.radmgr-orig'):
+            shutil.copy2(PROXY_CONF, PROXY_CONF + '.radmgr-orig')
+    write_file(PROXY_CONF, proxy_conf_text(state.get('proxy')), 0o640)
+    write_file(PROXY_JSON, proxy_json(state.get('proxy')), 0o640)
+    data_file = f'{RADDB}/authorized_macs'
+    if not os.path.exists(data_file):
+        write_file(data_file, b'', 0o640, SERVICE_USER, 'freerad')
+    save_state(state)
+    error = config_error()
+    if error:
+        sys.exit(f'FreeRADIUS config check failed:\n{error}')
+
+
+if __name__ == '__main__':
+    if os.geteuid() != 0:
+        sys.exit('must run as root')
+    command = sys.argv[1] if len(sys.argv) > 1 else ''
+    if command == 'process':
+        process()
+    elif command == 'render':
+        render()
+    else:
+        sys.exit(__doc__)

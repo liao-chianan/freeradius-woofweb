@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}確認儲存 SSID 規則 - radius 登入管理{% endblock %}
+{% block content %}
+<div class="toolbar"><div class="toolbar-title"><h1>確認儲存 SSID 規則</h1></div></div>
+<p class="muted">規則還沒有儲存。確認後下一次登入立即生效，全校的 Wi-Fi 認證都會套用。</p>
+{% if proxy_missing %}<div class="notice error" role="alert">有規則使用 Proxy 代理，但尚未在 <a href="{{ base }}/proxy">Proxy 代理</a> 頁設定外部 RADIUS，這些 SSID 的登入會全部被拒絕。</div>{% endif %}
+{% if impact|selectattr('warning')|list %}<div class="notice error" role="alert">有 SSID 的登入會受影響，請看下方的警告後再確認。</div>{% endif %}
+<section class="card section">
+    <h2>新的規則</h2>
+    <div class="table-wrap"><table class="compact">
+        <thead><tr><th>順序</th><th>SSID 關鍵字</th><th>驗證方式</th><th>VLAN</th></tr></thead>
+        <tbody>
+            {% for r in new.rules %}<tr><td>{{ loop.index }}</td><td class="strong">{{ r.keyword }}</td><td>{{ labels[r.auth] }}</td><td>{{ r.vlan or ('依名單' if r.auth == 'mac' else '-') }}</td></tr>{% endfor %}
+            <tr><td></td><td>（沒有吻合時）</td><td>{{ labels[new.default.auth] }}</td><td>{{ new.default.vlan or ('依名單' if new.default.auth == 'mac' else '-') }}</td></tr>
+        </tbody>
+    </table></div>
+</section>
+<section class="card section">
+    <h2>對最近 {{ seen_days }} 天登入過的 SSID 的影響</h2>
+    {% if impact %}
+    <div class="table-wrap"><table class="compact">
+        <thead><tr><th>SSID</th><th>名單裝置登入</th><th>AD 登入</th><th>Google 登入</th><th>Proxy 登入</th><th>目前</th><th>套用後</th><th>警告</th></tr></thead>
+        <tbody>{% for i in impact %}<tr{% if i.changed %} class="changed"{% endif %}><td class="strong">{{ i.ssid }}</td><td>{{ i.mac }}</td><td>{{ i.ad }}</td><td>{{ i.google }}</td><td>{{ i.proxy }}</td><td>{{ i.before }}</td><td>{{ i.after }}</td><td>{% if i.warning %}<span class="status-off">{{ i.warning }}</span>{% endif %}</td></tr>{% endfor %}</tbody>
+    </table></div>
+    {% else %}<p class="muted">尚無紀錄，無法預估影響。</p>{% endif %}
+</section>
+<div class="card section confirm-bar">
+    <form method="post" action="{{ base }}/ssid"><input type="hidden" name="confirmed" value="1"><input type="hidden" name="rules_json" value="{{ rules_json }}"><button type="submit" class="btn primary">確認儲存</button></form>
+    <a class="btn" href="{{ base }}/ssid">取消</a>
+</div>
+{% endblock %}

@@ -1,0 +1,12 @@
+<p class="muted">到 Google 管理控制台 → 應用程式 → LDAP 新增用戶端，開啟「驗證使用者憑證」與「讀取使用者資訊」，下載憑證，再產生存取憑證。用戶端開啟後最久要 24 小時才生效。</p>
+<div class="field-grid">
+  <label>Google Workspace 網域<input name="google_domain" value="{{ values.get('google_domain', settings.get('google_domain', '')) }}" placeholder="example.org" autocomplete="off" required>
+    <small class="muted">Base DN 會自動由網域產生。</small></label>
+  <label>存取憑證：使用者名稱<input name="identity" autocomplete="off" required></label>
+  <label>存取憑證：密碼<input type="password" name="access_password" autocomplete="new-password" required></label>
+  <label>用戶端憑證（.crt）<input type="file" name="cert_file" accept=".crt,.pem,.cer" required></label>
+  <label>用戶端私鑰（.key）<input type="file" name="key_file" accept=".key,.pem" required></label>
+  <label>測試帳號 email（選填）<input type="email" name="test_email" value="{{ values.get('test_email', '') }}" autocomplete="off">
+    <small class="muted">確認真的能驗證。</small></label>
+  <label>測試帳號密碼<input type="password" name="test_password" autocomplete="new-password"></label>
+</div>

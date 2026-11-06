@@ -1,0 +1,7 @@
+# radius-manager: 記錄 MAC 認證成功。格式：epoch|MAC|封包來源 IP|NAS-IP-Address|Called-Station-Id（SSID 可能含 |，必須放最後）
+linelog macauth_log {
+	filename = ${logdir}/macauth/auth-%Y%m%d.log
+	escape_filenames = no
+	permissions = 0640
+	format = "%l|%{Calling-Station-Id}|%{%{Packet-Src-IP-Address}:-%{Packet-Src-IPv6-Address}}|%{%{NAS-IP-Address}:-%{NAS-IPv6-Address}}|%{Called-Station-Id}"
+}

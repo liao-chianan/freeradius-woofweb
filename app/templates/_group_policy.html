@@ -1,0 +1,21 @@
+{% set gp = group_policy %}
+{% if gp.enforce and not gp.updated %}<div class="notice error" role="alert">Wi-Fi 限制已開啟，但目前取不到{{ gp.item }}資料。{% if gp.source == 'ad' %}AD 群組資料取不到時，登入一律放行，不會拒絕任何人。{% endif %}</div>
+{% elif gp.enforce and gp.stale %}<div class="notice warning" role="status">{{ gp.item }}資料已久未更新（最後更新 {{ gp.updated }}）。</div>{% endif %}
+<details class="card section group-policy"{% if not gp.enforce %} open{% endif %}>
+    <summary>Wi-Fi 使用權限（{{ gp.title }}）：{% if gp.enforce %}<span>已限制，{{ gp.allowed_count }} / {{ gp.total }} {{ gp.member }}可使用</span>{% else %}<span>未限制，所有{{ gp.member }}都可使用</span>{% endif %}</summary>
+    {% if gp.rows %}
+    <form method="post" action="{{ base }}/group-policy/{{ gp.source }}">
+        <label class="group-policy-enforce"><input type="checkbox" name="enforce" value="1" {{ 'checked' if gp.enforce }}> 只允許勾選的{{ gp.item }}通過 RADIUS 驗證</label>
+        <p class="muted">資料更新於 {{ gp.updated }}。{% if gp.source == 'ad' %}成員包含主要群組與巢狀群組，每 5 分鐘從 AD 更新，帳號異動最多 5 分鐘後生效。{% else %}勾選上層機構會包含底下的子機構。清單每 15 分鐘更新，登入時的判斷則以 Google 當下回傳的機構為準。{% endif %}已連線的裝置不會斷線，下次認證時才套用。</p>
+        <div class="table-wrap group-policy-list"><table class="compact">
+            <thead><tr><th>可用 Wi-Fi</th><th>{{ gp.item }}</th><th>{{ gp.member }}數</th></tr></thead>
+            <tbody>{% for row in gp.rows %}<tr>
+                <td><input type="checkbox" name="allowed" value="{{ row.id }}" aria-label="{{ row.label }} 可用 Wi-Fi" {{ 'checked' if row.checked }}></td>
+                <td><a href="{{ base }}{{ '/ad/group' if gp.source == 'ad' else '/google/ou' }}?id={{ row.id|urlencode }}">{{ row.label }}</a></td>
+                <td>{{ row.count }}</td>
+            </tr>{% endfor %}</tbody>
+        </table></div>
+        <button type="submit" class="btn primary">儲存</button>
+    </form>
+    {% else %}<p class="muted">目前還沒有{{ gp.item }}資料。{% if gp.source == 'ad' %}請確認 AD 已設定，並按下方的「重新查詢 AD」。{% else %}請確認 Google 已設定，並按下方的「重新查詢 Google」。{% endif %}</p>{% endif %}
+</details>

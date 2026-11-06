@@ -1,0 +1,9 @@
+[Unit]
+Description=Refresh Google directory data when radius-manager requests it
+
+[Path]
+PathChanged=/var/lib/radius-manager/google_refresh
+Unit=radius-manager-google-dir.service
+
+[Install]
+WantedBy=multi-user.target

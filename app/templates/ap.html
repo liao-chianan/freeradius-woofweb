@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block title %}AP 管理 - radius 登入管理{% endblock %}
+{% block content %}
+<div class="toolbar">
+    <div class="toolbar-title"><h1>AP 管理</h1><span class="count" id="row-count">共 {{ aps|length }} 筆</span></div>
+    <input type="search" id="filter" placeholder="搜尋裝置名稱、IP 或 MAC" aria-label="搜尋">
+    <div class="toolbar-actions">
+        <a class="btn" href="{{ base }}/ap/export">匯出 CSV</a>
+        <button type="button" class="btn" data-open-dialog="ap-import-dialog">匯入 CSV</button>
+        <button type="button" class="btn primary" data-open-dialog="ap-add-dialog">新增 AP</button>
+    </div>
+</div>
+<p class="muted">用來在登入紀錄顯示連線的 AP：先比 Called-Station-Id 的 MAC，比不到再比要求認證的 IP。變更這份清單不會重啟 FreeRADIUS，也不影響認證。</p>
+<div class="table-wrap card">
+    <table id="entries">
+        <thead>
+            <tr>
+                <th data-sort="name" aria-sort="none">裝置名稱</th>
+                <th data-sort="ip" aria-sort="none">IP</th>
+                <th data-sort="macaddr" aria-sort="none">MAC</th>
+                <th data-sort="modified" aria-sort="none">異動日期</th>
+                <th class="actions-col">操作</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for a in aps %}
+            <tr data-name="{{ a.name }}" data-ip="{{ a.ip }}" data-macaddr="{{ a.mac }}" data-modified="{{ a.modified }}" data-search="{{ a.name }} {{ a.ip }} {{ a.mac }}">
+                <td class="strong">{{ a.name }}</td>
+                <td class="mono">{{ a.ip }}</td>
+                <td class="mono">{{ a.mac }}</td>
+                <td class="nowrap">{{ a.modified }}</td>
+                <td class="actions-col">
+                    <form method="post" action="{{ base }}/ap/preview"><input type="hidden" name="op" value="delete"><input type="hidden" name="key" value="{{ a.mac }}">
+                        <button type="submit" class="btn small danger-outline">刪除</button></form>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    <p class="empty" id="empty" {% if aps %}hidden{% endif %}>找不到符合的資料</p>
+</div>
+<dialog id="ap-add-dialog" aria-labelledby="ap-add-title">
+    <h2 id="ap-add-title">新增 AP</h2>
+    <form method="post" action="{{ base }}/ap/preview" class="stack">
+        <input type="hidden" name="op" value="add">
+        <label>裝置名稱<input name="name" maxlength="64" autocomplete="off" required>
+            <small class="muted">英數字開頭，可用英數字與 _ . -，最多 64 字</small></label>
+        <label>IP<input name="ip" class="mono" placeholder="192.168.99.1" autocomplete="off" required></label>
+        <label>MAC<input name="mac" class="mono" placeholder="AA-BB-CC-DD-EE-FF" autocomplete="off" required>
+            <small class="muted">可用 : 或 - 分隔。裝置名稱、IP、MAC 都不可重複。</small></label>
+        <div class="dialog-actions">
+            <button type="button" class="btn js-close">取消</button>
+            <button type="submit" class="btn primary">下一步：確認</button>
+        </div>
+    </form>
+</dialog>
+<dialog id="ap-import-dialog" aria-labelledby="ap-import-title">
+    <h2 id="ap-import-title">匯入 AP 清單</h2>
+    <form method="post" action="{{ base }}/ap/import/preview" enctype="multipart/form-data" class="stack">
+        <label>CSV 檔案<input type="file" name="csvfile" accept=".csv,.tsv,.txt" required>
+            <small class="muted">欄位順序：裝置名稱、IP、MAC（與匯出檔相同）。此步驟只比對，不會變更清單。</small></label>
+        <fieldset>
+            <legend>匯入方式</legend>
+            <label class="radio"><input type="radio" name="mode" value="merge" checked> 合併：新增與更新，檔案沒有的資料保留</label>
+            <label class="radio"><input type="radio" name="mode" value="replace"> 完全取代：檔案沒有的資料會被刪除</label>
+        </fieldset>
+        <div class="dialog-actions">
+            <button type="button" class="btn js-close">取消</button>
+            <button type="submit" class="btn primary">下一步：比對資料</button>
+        </div>
+    </form>
+</dialog>
+{% include "dialogs.html" %}
+{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='app.js') }}"></script>{% endblock %}

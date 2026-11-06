@@ -1,0 +1,29 @@
+[Unit]
+Description=RADIUS manager web interface
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=radmgr
+Group=radmgr
+Restart=always
+RestartSec=3
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=RADIUS_DATA_FILE=/run/radius-manager-macs
+# Web port and URL prefix, written by install.sh (sudo bash install.sh --port N to change).
+EnvironmentFile=-/etc/radius-manager/web.env
+WorkingDirectory=/opt/radius-manager/current/app
+ExecStart=/usr/bin/python3 -I /opt/radius-manager/current/app/radius_manager.py
+SyslogIdentifier=radius-manager
+# /etc/freeradius holds the shared secrets, so only the device list is bound in.
+BindPaths=/etc/freeradius/3.0/authorized_macs:/run/radius-manager-macs
+ReadWritePaths=/etc/radius-manager /var/log/radius-manager /var/lib/radius-manager /var/log/freeradius/macauth
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

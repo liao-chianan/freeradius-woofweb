@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% block title %}主機與驗證設定 - radius 登入管理{% endblock %}
+{% block page_class %}narrow{% endblock %}
+{% block content %}
+<section class="card">
+  <h1>主機與驗證設定</h1>
+  <p class="muted">其他設定在 <a href="{{ base }}/settings">系統設定</a>，管理者帳號與來源 IP 在 <a href="{{ base }}/account">帳號設定</a>。版本 {{ version }}。</p>
+  {% if org_error %}<div class="notice error" role="alert">{{ org_error }}</div>{% endif %}
+  {% if org_message %}<div class="notice success" role="status">{{ org_message }}</div>{% endif %}
+  <form method="POST" class="stack" autocomplete="off">
+    <input type="hidden" name="action" value="org">
+    <label>單位名稱<input name="org_name" value="{{ settings.get('org_name', '') }}" maxlength="60" required></label>
+    <button class="btn primary">儲存</button>
+  </form>
+</section>
+<section class="card section" id="radius">
+  <h2>RADIUS 用戶端</h2>
+  <p class="muted">修改後會重新啟動 FreeRADIUS，Wi-Fi 認證可能短暫中斷，控制器上的 secret 也要同步修改。</p>
+  {% if radius_error %}<div class="notice error" role="alert">{{ radius_error }}</div>{% endif %}
+  {% if radius_message %}<div class="notice success" role="status">{{ radius_message }}</div>{% endif %}
+  <form method="POST" class="stack" autocomplete="off">
+    <input type="hidden" name="action" value="radius">
+    <label>RADIUS secret<input name="radius_secret" class="mono" value="{{ secret }}" required></label>
+    <label>允許的網段<textarea name="radius_networks" rows="3" class="mono" spellcheck="false">{{ networks }}</textarea>
+      <small class="muted">一行一筆。0.0.0.0 代表任何來源，不建議長期使用。</small></label>
+    <button class="btn primary">套用</button>
+  </form>
+</section>
+<section class="card section" id="ad">
+  <h2>AD 帳號驗證：{{ '已啟用' if settings.get('ad_enabled') else '未啟用' }}</h2>
+  {% set res = ad_result %}{% include "_steps_result.html" %}
+  {% if settings.get('ad_enabled') %}
+    <p class="muted">網域 {{ settings.get('ad_realm') }}。</p>
+    <form method="POST" class="stack" autocomplete="off">
+      <div class="field-grid">
+        <label>測試帳號（選填）<input name="test_user" autocomplete="off"></label>
+        <label>測試帳號密碼<input type="password" name="test_password" autocomplete="new-password"></label>
+      </div>
+      <div class="setup-actions">
+        <button class="btn" name="action" value="ad_disable" formnovalidate onclick="return confirm('確定要停用 AD 帳號驗證？')">停用</button>
+        <button class="btn primary" name="action" value="ad_test">重新驗證</button>
+      </div>
+    </form>
+    <h3>重新加入網域或更換網域</h3>
+  {% endif %}
+  <form method="POST" class="stack" autocomplete="off">
+    {% set values = {} %}{% include "_ad_fields.html" %}
+    <button class="btn primary" name="action" value="ad_join">驗證並啟用</button>
+  </form>
+</section>
+<section class="card section" id="google">
+  <h2>Google 帳號驗證：{{ '已啟用' if settings.get('google_enabled') else '未啟用' }}</h2>
+  {% set res = google_result %}{% include "_steps_result.html" %}
+  {% if google_result and google_result.cert_expires %}<pre class="cert-info">{{ google_result.cert_expires }}</pre>{% endif %}
+  {% if settings.get('google_enabled') %}
+    <p class="muted">網域 {{ settings.get('google_domain') }}。Google 用戶端憑證有到期日，到期前要重新下載上傳。</p>
+    <form method="POST" class="stack" autocomplete="off">
+      <div class="field-grid">
+        <label>測試帳號 email（選填）<input type="email" name="test_email" autocomplete="off"></label>
+        <label>測試帳號密碼<input type="password" name="test_password" autocomplete="new-password"></label>
+      </div>
+      <div class="setup-actions">
+        <button class="btn" name="action" value="google_disable" formnovalidate onclick="return confirm('確定要停用 Google 帳號驗證並刪除憑證？')">停用</button>
+        <button class="btn primary" name="action" value="google_test">重新驗證</button>
+      </div>
+    </form>
+    <h3>更新憑證或存取憑證</h3>
+  {% endif %}
+  <form method="POST" class="stack" enctype="multipart/form-data" autocomplete="off">
+    {% set values = {} %}{% include "_google_fields.html" %}
+    <button class="btn primary" name="action" value="google_configure">驗證並啟用</button>
+  </form>
+</section>
+<section class="card section" id="cert">
+  <h2>RADIUS 伺服器憑證</h2>
+  {% set res = cert_result %}{% include "_steps_result.html" %}
+  {% if cert_info %}<pre class="cert-info">{{ cert_info }}</pre>{% endif %}
+  <form method="POST" class="stack" enctype="multipart/form-data" autocomplete="off">
+    <input type="hidden" name="action" value="eap_cert">
+    <label>伺服器名稱（FQDN）<input name="fqdn" value="{{ settings.get('radius_fqdn', '') }}" placeholder="radius.example.org"></label>
+    <label>憑證方式<select name="cert_mode"><option value="self_signed">產生自簽憑證</option><option value="upload">上傳憑證（建議用公開 CA）</option></select></label>
+    <div class="field-grid">
+      <label>完整憑證鏈 fullchain<input type="file" name="cert_file" accept=".pem,.crt"></label>
+      <label>私鑰 privkey<input type="file" name="key_file" accept=".pem,.key"></label>
+    </div>
+    <button class="btn primary">套用</button>
+  </form>
+</section>
+<section class="card section" id="web-cert">
+  <h2>管理介面 HTTPS 憑證</h2>
+  <p class="muted">預設是自簽憑證。上傳後服務會重新啟動。</p>
+  {% set res = web_cert_result %}{% include "_steps_result.html" %}
+  <form method="POST" class="stack" enctype="multipart/form-data" autocomplete="off">
+    <input type="hidden" name="action" value="web_cert">
+    <div class="field-grid">
+      <label>完整憑證鏈 fullchain<input type="file" name="cert_file" accept=".pem,.crt" required></label>
+      <label>私鑰 privkey<input type="file" name="key_file" accept=".pem,.key" required></label>
+    </div>
+    <button class="btn primary">上傳並套用</button>
+  </form>
+</section>
+{% endblock %}

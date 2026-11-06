@@ -1,0 +1,8 @@
+# radius-manager: 每日裝置上限，由 inner-tunnel 的 post-auth 以 %{device_limit:...} 呼叫。
+# 不可改成直接呼叫模組：rlm_exec 在程式異常結束時會把回覆改成 Access-Reject（實測 fail = 1 也擋不住），
+# 程式壞掉就會全校登入失敗。%{...} 形式異常時只是取不到值，條件不成立就放行。
+exec device_limit {
+	wait = yes
+	shell_escape = yes
+	timeout = 5
+}

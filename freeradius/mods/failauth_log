@@ -1,0 +1,8 @@
+# radius-manager: 記錄認證失敗。格式：epoch|封包來源 IP|NAS-IP-Address|規則結果|hex(Calling-Station-Id)|hex(內層帳號)|hex(外層 User-Name)|hex(內層失敗原因)|hex(失敗原因)|hex(Called-Station-Id)
+# 這些值都由裝置或 AP 送來、尚未驗證，一律以 hex 寫入，避免 | 或換行破壞欄位。
+linelog failauth_log {
+	filename = ${logdir}/macauth/fail-%Y%m%d.log
+	escape_filenames = no
+	permissions = 0640
+	format = "%l|%{%{Packet-Src-IP-Address}:-%{Packet-Src-IPv6-Address}}|%{%{NAS-IP-Address}:-%{NAS-IPv6-Address}}|%{control:Tmp-String-1}|%{hex:&Calling-Station-Id}|%{hex:&session-state:Tmp-String-3}|%{hex:&User-Name}|%{hex:&session-state:Module-Failure-Message}|%{hex:&Module-Failure-Message}|%{hex:&Called-Station-Id}"
+}

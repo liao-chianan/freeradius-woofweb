@@ -1,0 +1,54 @@
+#!/usr/bin/python3 -I
+"""SSID 規則：radius-ssid-policy <macauth 目錄> [Called-Station-Id 的 hex]。由 FreeRADIUS 在 authorize 呼叫。
+輸出「驗證方式|VLAN」，Proxy 代理另加「|PEAP」或「|TTLS」（外層要先提議的方式），驗證方式為 mac、ad、google、proxy 或 reject，VLAN 可為空。規則由上而下，第一個關鍵字吻合的生效（不分大小寫）。
+任何錯誤都不輸出，FreeRADIUS 改用內建判斷（SSID 結尾是 Device 用名單，其他用 AD）：這支程式壞掉不可讓全校無法登入。"""
+import json
+import os
+import re
+import sys
+
+CALLED_RE = re.compile(r'(?:[0-9A-Fa-f]{2}[-:]){5}[0-9A-Fa-f]{2}(?::(.*))?', re.S)
+AUTH = ('mac', 'ad', 'google', 'proxy', 'reject')
+
+
+def ssid_of(called):
+    match = CALLED_RE.fullmatch(called)
+    if not match:
+        return called
+    return match.group(1) or ''
+
+
+def proxy_outer(directory):
+    try:
+        with open(os.path.join(directory, 'proxy-filter.json'), encoding='utf-8') as f:
+            outer = json.load(f).get('outer', 'PEAP')
+        return outer if outer in ('PEAP', 'TTLS') else 'PEAP'
+    except Exception:
+        return 'PEAP'
+
+
+def decide(directory, called):
+    with open(os.path.join(directory, 'ssid-rules.json'), encoding='utf-8') as f:
+        config = json.load(f)
+    ssid = ssid_of(called).lower()
+    chosen = config['default']
+    for rule in config['rules']:
+        if rule['keyword'] and rule['keyword'].lower() in ssid:
+            chosen = rule
+            break
+    auth, vlan = chosen['auth'], str(chosen.get('vlan', ''))
+    if auth not in AUTH:
+        raise ValueError(auth)
+    if vlan and not (vlan.isascii() and vlan.isdigit() and 1 <= int(vlan) <= 4094):
+        raise ValueError(vlan)
+    if auth == 'proxy':
+        return f'proxy|{vlan}|{proxy_outer(directory)}'
+    return f'{auth}|{vlan}'
+
+
+if __name__ == '__main__':
+    try:
+        print(decide(sys.argv[1], bytes.fromhex(sys.argv[2] if len(sys.argv) > 2 else '').decode('utf-8', 'replace')))
+    except Exception as e:
+        print(f'radius-ssid-policy: {e}', file=sys.stderr)
+    sys.exit(0)

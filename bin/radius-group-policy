@@ -1,0 +1,80 @@
+#!/usr/bin/python3 -I
+"""Wi-Fi 黑名單與群組限制：radius-group-policy <macauth 目錄> ad <帳號>，或 radius-group-policy <macauth 目錄> google <email> <使用者 DN 的 hex>。
+由 FreeRADIUS 在內層驗證成功後呼叫。帳號在黑名單輸出 blacklist，不在允許的群組輸出 deny，其餘情況不輸出。
+DN 放最後：DN 是空的時參數可能少一個，此時只判斷黑名單。
+任何錯誤都放行：這支程式壞掉不可讓全校無法登入 Wi-Fi，管理頁會警告資料取不到。黑名單與群組各自判斷，一邊出錯不影響另一邊。"""
+import json
+import os
+import re
+import sys
+
+
+def normalize_account(value):
+    value = value.strip()
+    if '\\' in value:
+        value = value.rsplit('\\', 1)[1]
+    if '@' in value:
+        value = value.split('@', 1)[0]
+    return value.lower()
+
+
+def unescape_dn(value):
+    """DN 的值可能是 \\E5\\9B\\9B 或 \\, 這種跳脫形式。"""
+    def repl(match):
+        text = match.group(1)
+        return bytes.fromhex(text.decode()) if len(text) == 2 else text
+    return re.sub(rb'\\([0-9A-Fa-f]{2}|.)', repl, value.encode('utf-8', 'surrogateescape'), flags=re.S).decode('utf-8', 'replace')
+
+
+def google_ou_path(dn):
+    """uid=x,ou=A班,ou=四年級,ou=Users,dc=y 回傳 ['四年級', 'A班']；直接在 ou=Users 底下回傳 []。不在 ou=Users 底下視為錯誤。"""
+    ous = [unescape_dn(part[3:]).strip() for part in re.findall(r'(?:[^,\\]|\\.)+', dn) if part[:3].lower() == 'ou=']
+    ous.reverse()
+    if not ous or ous[0].lower() != 'users':
+        raise ValueError('not under ou=Users')
+    return ous[1:]
+
+
+def blacklisted(directory, source, account):
+    """AD 比對去掉網域的小寫帳號；Google 比對完整 email（小寫），網頁上看到的就是 email。"""
+    with open(os.path.join(directory, 'blacklist.json'), encoding='utf-8') as f:
+        names = json.load(f)[source]
+    key = normalize_account(account) if source == 'ad' else account.strip().lower()
+    return key in {str(name) for name in names}
+
+
+def denied(directory, source, value):
+    with open(os.path.join(directory, 'group-policy.json'), encoding='utf-8') as f:
+        config = json.load(f)[source]
+    if not config['enforce']:
+        return False
+    allowed = set(config['allowed'])
+    if source == 'ad':
+        with open(os.path.join(directory, 'ad-members.json'), encoding='utf-8') as f:
+            members = json.load(f)['members']
+        return allowed.isdisjoint(members.get(normalize_account(value), []))
+    path = google_ou_path(bytes.fromhex(value).decode('utf-8', 'replace'))
+    # 勾選上層機構就包含底下的子機構；空字串是最上層
+    return allowed.isdisjoint('/'.join(path[:depth]) for depth in range(len(path) + 1))
+
+
+def check(func, *args):
+    try:
+        return func(*args)
+    except FileNotFoundError:
+        return False
+    except Exception as e:
+        print(f'radius-group-policy: {func.__name__}: {e}', file=sys.stderr)
+        return False
+
+
+if __name__ == '__main__':
+    args = sys.argv[1:]
+    if len(args) >= 3 and args[1] in ('ad', 'google'):
+        directory, source, account = args[:3]
+        if check(blacklisted, directory, source, account):
+            print('blacklist')
+        elif len(args) >= 4 or source == 'ad':
+            if check(denied, directory, source, account if source == 'ad' else args[3]):
+                print('deny')
+    sys.exit(0)

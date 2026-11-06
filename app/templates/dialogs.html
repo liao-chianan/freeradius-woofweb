@@ -1,0 +1,61 @@
+<dialog id="entry-dialog" aria-labelledby="entry-title">
+    <h2 id="entry-title"></h2>
+    <div class="notice error" id="entry-errors" role="alert" hidden></div>
+    <form id="entry-form" class="stack" novalidate>
+        <input type="hidden" name="op"><input type="hidden" name="key">
+        <label>裝置名稱<input name="id" maxlength="64" autocomplete="off" required>
+            <small class="muted">英數字與 _ . -，最多 64 字</small></label>
+        <label>MAC<input name="mac" class="mono" placeholder="AA-BB-CC-DD-EE-FF" autocomplete="off" required>
+            <small class="muted">可用 : 或 - 分隔，會自動轉成大寫與 -</small></label>
+        <div class="field-row">
+            <label>VLAN<input name="tunnel_group" inputmode="numeric"></label>
+            <label>Tunnel-Type<input name="tunnel_type" inputmode="numeric"></label>
+            <label>Medium-Type<input name="tunnel_medium" inputmode="numeric"></label>
+        </div>
+        <small class="muted" id="add-defaults" hidden>新增時 VLAN {{ defaults.tunnel_group }}、Tunnel-Type {{ defaults.tunnel_type }}、Medium-Type {{ defaults.tunnel_medium }} 為固定值。</small>
+        <div class="dialog-actions">
+            <button type="button" class="btn js-close">取消</button>
+            <button type="submit" class="btn primary">下一步：確認</button>
+        </div>
+    </form>
+    <div id="entry-confirm" hidden>
+        <p id="confirm-lead"></p>
+        <table class="compact" id="confirm-table"></table>
+        <p class="muted">確認後會先備份，再更新名單並重啟 FreeRADIUS，認證可能短暫中斷。</p>
+        <div class="dialog-actions">
+            <button type="button" class="btn js-close">取消</button>
+            <button type="button" class="btn" id="confirm-back">返回修改</button>
+            <button type="button" class="btn primary" id="confirm-go">確認執行</button>
+        </div>
+    </div>
+</dialog>
+<dialog id="logins-dialog" class="wide" aria-labelledby="logins-title">
+    <h2 id="logins-title">登入紀錄</h2>
+    <p class="muted" id="logins-device"></p>
+    <div class="notice error" id="logins-error" role="alert" hidden></div>
+    <p class="empty" id="logins-empty" hidden>目前沒有成功登入的紀錄</p>
+    <div class="table-wrap logins-wrap" id="logins-wrap" hidden>
+        <table class="compact">
+            <thead id="logins-head"></thead>
+            <tbody id="logins-rows"></tbody>
+        </table>
+    </div>
+    <p class="muted" id="logins-note"></p>
+    <div class="dialog-actions"><button type="button" class="btn js-close">關閉</button></div>
+</dialog>
+<dialog id="import-dialog" aria-labelledby="import-title">
+    <h2 id="import-title">匯入 CSV</h2>
+    <form method="post" action="{{ base }}/import/preview" enctype="multipart/form-data" class="stack">
+        <label>CSV 檔案<input type="file" name="csvfile" accept=".csv" required>
+            <small class="muted">欄位順序與匯出檔相同，須為 UTF-8。此步驟只比對，不會變更名單。</small></label>
+        <fieldset>
+            <legend>匯入方式</legend>
+            <label class="radio"><input type="radio" name="mode" value="merge" checked> 合併：新增與更新，檔案沒有的資料保留</label>
+            <label class="radio"><input type="radio" name="mode" value="replace"> 完全取代：檔案沒有的資料會被刪除</label>
+        </fieldset>
+        <div class="dialog-actions">
+            <button type="button" class="btn js-close">取消</button>
+            <button type="submit" class="btn primary">下一步：比對資料</button>
+        </div>
+    </form>
+</dialog>

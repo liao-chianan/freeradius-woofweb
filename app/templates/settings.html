@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}系統設定 - radius 登入管理{% endblock %}
+{% block page_class %}narrow{% endblock %}
+{% block content %}
+<section class="card">
+    <h1>系統設定</h1>
+    <p class="muted">單位名稱、RADIUS 用戶端、AD 與 Google 驗證、憑證請到 <a href="{{ base }}/settings/system">主機與驗證設定</a>。</p>
+    {% if error %}<div class="notice error" role="alert">{{ error }}</div>{% endif %}
+    {% if message %}<div class="notice success" role="status">{{ message }}</div>{% endif %}
+    <form method="POST" class="stack">
+        <label>每台裝置、每個 AD 帳號與每個 Google 帳號保留的登入紀錄筆數
+            <input name="login_retention" inputmode="numeric" value="{{ retention }}" required>
+            <small class="muted">預設 50，可設定 1 到 {{ maximum }}。</small></label>
+        <label class="check"><input type="checkbox" name="confirm_shrink" value="1">
+            <span>若調低筆數或天數，我了解超過的舊紀錄會立即刪除</span></label>
+        <label>驗證失敗紀錄保留天數
+            <input name="fail_retention_days" inputmode="numeric" value="{{ fail_days }}" required>
+            <small class="muted">預設 14，可設定 1 到 {{ max_fail_days }}。</small></label>
+        <label>每個 AD 或 Google 帳號在一個週期內可登入的裝置數
+            <input name="device_limit" inputmode="numeric" value="{{ device_limit }}" required>
+            <small class="muted">預設 3，0 表示不限制，最多 {{ max_device_limit }}。以 MAC 計算；同一週期內用過的裝置不受影響。同名的 AD 與 Google 帳號分開計算。立即生效，不需重啟 FreeRADIUS。</small></label>
+        <label>裝置數重置週期
+            <select name="window_hours">
+                {% for hours in window_choices %}<option value="{{ hours }}" {{ 'selected' if hours|string == window_hours|string }}>{% if hours == 24 %}每天（00:00）{% else %}每 {{ hours }} 小時{% endif %}</option>{% endfor %}
+            </select>
+            <small class="muted">從 00:00 起算，例如每 8 小時是 00:00、08:00、16:00 重置。下次重置：{{ next_reset }}。更改週期後，以裝置最近登入的時間重新計算。</small></label>
+        <label>不受裝置數限制的帳號
+            <textarea name="exempt" rows="4">{{ exempt }}</textarea>
+            <small class="muted">一行一個帳號，例如共用帳號或管理者帳號。AD 帳號直接填寫，Google 帳號要寫成 google:帳號（不含 @ 之後）；兩者分開設定，填 AD 帳號不會排除同名的 Google 帳號。</small></label>
+        <button type="submit" class="btn primary">儲存</button>
+    </form>
+</section>
+<section class="card section">
+    <h2>手動重置裝置數</h2>
+    <p class="muted">讓所有 AD 與 Google 帳號立刻從 0 重新計算，只執行一次，不改變重置週期。已連線的裝置不會斷線，下次認證時才重新計入。要重置單一帳號，請到 <a href="{{ base }}/ad">AD 帳號</a>或 <a href="{{ base }}/google">Google 帳號</a>頁。</p>
+    <form method="POST" action="{{ base }}/device-limit/reset" class="stack">
+        <input type="hidden" name="scope" value="all">
+        <label class="check"><input type="checkbox" name="confirmed" value="1" required>
+            <span>我了解全部帳號的裝置數會立即重新計算</span></label>
+        <button type="submit" class="btn">重置全部帳號</button>
+    </form>
+</section>
+{% endblock %}

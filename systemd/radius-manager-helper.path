@@ -1,0 +1,9 @@
+[Unit]
+Description=Run the RADIUS manager helper when the web interface queues a request
+
+[Path]
+PathExistsGlob=/var/lib/radius-manager/requests/*.json
+Unit=radius-manager-helper.service
+
+[Install]
+WantedBy=multi-user.target

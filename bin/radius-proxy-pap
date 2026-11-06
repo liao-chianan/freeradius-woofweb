@@ -1,0 +1,101 @@
+#!/usr/bin/python3 -I
+"""Proxy 代理的 PAP 轉送：radius-proxy-pap <radius-manager-proxy.json>。由 inner-tunnel 的 Auth-Type PAP 以 proxy_pap 模組呼叫，
+內層是 TTLS/PAP 或 GTC 時，FreeRADIUS 已在 TLS 通道內拿到明文密碼，這裡以一般 PAP 送給外部 RADIUS。
+帳號密碼由 rlm_exec 以環境變數傳入（不放命令列，ps 看不到）。FreeRADIUS 3.2 用屬性原名 User-Name、User-Password，舊版是 USER_NAME。
+結束碼：0 外部接受，1 外部拒絕，2 沒有回應、金鑰不符或設定錯誤（rlm_exec 對應 ok／reject／fail，FreeRADIUS 兩者都拒絕）。"""
+import hashlib
+import hmac
+import json
+import os
+import secrets
+import socket
+import struct
+import sys
+import time
+
+
+def attr(kind, value):
+    return bytes((kind, len(value) + 2)) + value
+
+
+def encrypt_password(password, secret, authenticator):
+    """RFC 2865 5.2"""
+    data = password + b'\x00' * (-len(password) % 16 or (16 if not password else 0))
+    out, last = b'', authenticator
+    for i in range(0, len(data), 16):
+        key = hashlib.md5(secret + last).digest()
+        last = bytes(a ^ b for a, b in zip(data[i:i + 16], key))
+        out += last
+    return out
+
+
+def pap_request(server, port, secret, username, password, timeout=6):
+    """回傳 ('accept'|'reject'|'timeout'|'badsecret'|'dns', 訊息)。"""
+    secret = secret.encode()
+    authenticator = os.urandom(16)
+    packet_id = secrets.randbelow(256)
+    attrs = (attr(1, username.encode()) + attr(2, encrypt_password(password.encode(), secret, authenticator)) +
+             attr(32, b'radius-manager') + attr(80, bytes(16)))
+    packet = bytearray(struct.pack('>BBH', 1, packet_id, 20 + len(attrs)) + authenticator + attrs)
+    packet[-16:] = hmac.new(secret, bytes(packet), 'md5').digest()
+    try:
+        addr = socket.getaddrinfo(server, port, type=socket.SOCK_DGRAM)[0]
+    except OSError:
+        return 'dns', ''
+    deadline = time.time() + timeout
+    with socket.socket(addr[0], socket.SOCK_DGRAM) as sock:
+        reply = None
+        while reply is None and time.time() < deadline:
+            sock.sendto(bytes(packet), addr[4])
+            resend = min(deadline, time.time() + 2)
+            while time.time() < resend:
+                sock.settimeout(max(0.05, resend - time.time()))
+                try:
+                    data, _ = sock.recvfrom(4096)
+                except socket.timeout:
+                    break
+                if len(data) >= 20 and data[1] == packet_id:
+                    reply = data
+                    break
+        if reply is None:
+            return 'timeout', ''
+    code, _, length = struct.unpack('>BBH', reply[:4])
+    if length > len(reply) or not hmac.compare_digest(hashlib.md5(reply[:4] + authenticator + reply[20:length] + secret).digest(), reply[4:20]):
+        return 'badsecret', ''
+    messages, pos = [], 20
+    while pos + 2 <= length:
+        kind, size = reply[pos], reply[pos + 1]
+        if size < 2:
+            break
+        if kind == 18:
+            messages.append(reply[pos + 2:pos + size].decode('utf-8', 'replace').strip())
+        pos += size
+    return {2: 'accept', 3: 'reject'}.get(code, f'code{code}'), '；'.join(m for m in messages if m)[:300]
+
+
+def env_value(name):
+    """rlm_exec 在 shell_escape = no 時原樣放值；保險起見也接受加了雙引號的形式。"""
+    value = os.environ.get(name, os.environ.get(name.upper().replace('-', '_'), ''))
+    if len(value) >= 2 and value[0] == value[-1] == '"':
+        value = value[1:-1].replace('\\"', '"').replace('\\\\', '\\')
+    return value
+
+
+if __name__ == '__main__':
+    try:
+        with open(sys.argv[1], encoding='utf-8') as f:
+            config = json.load(f)
+        username, password = env_value('User-Name'), env_value('User-Password')
+        if not config.get('server') or not username:
+            print('radius-proxy-pap: not configured or no user name', file=sys.stderr)
+            sys.exit(2)
+        result, detail = pap_request(config['server'], int(config['port']), config['secret'], username, password)
+    except SystemExit:
+        raise
+    except Exception as e:
+        print(f'radius-proxy-pap: {type(e).__name__}: {e}', file=sys.stderr)
+        sys.exit(2)
+    if result == 'accept':
+        sys.exit(0)
+    print(f'radius-proxy-pap: {result} {detail}'.strip(), file=sys.stderr)
+    sys.exit(1 if result == 'reject' else 2)

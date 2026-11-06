@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}確認 Wi-Fi 使用權限 - radius 登入管理{% endblock %}
+{% block content %}
+<div class="toolbar"><div class="toolbar-title"><h1>確認 Wi-Fi 使用權限（{{ info.title }}）</h1></div></div>
+<p class="muted">還沒有儲存。確認後下一次登入立即生效；已連線的裝置不會斷線，下次認證時才套用。</p>
+{% if enforce and not selected %}<div class="notice error" role="alert">開啟限制但沒有勾選任何{{ info.item }}，所有{{ info.member }}都無法登入 Wi-Fi。</div>
+{% elif lost %}<div class="notice warning" role="status">{{ lost }} 個{{ info.member }}將無法再登入 Wi-Fi。</div>{% endif %}
+<section class="card section">
+    <div class="table-wrap"><table class="compact"><tbody>
+        <tr><th>限制</th><td>{{ '只允許勾選的' ~ info.item if enforce else '不限制（勾選內容會保留，但不生效）' }}</td></tr>
+        <tr><th>可使用</th><td>{{ after_count }} / {{ total }} {{ info.member }}</td></tr>
+        <tr><th>新增可使用</th><td>{{ gained }}</td></tr>
+        <tr><th>不再可使用</th><td>{{ lost }}</td></tr>
+        <tr><th>勾選的{{ info.item }}</th><td>{% for option in selected %}<div>{{ option.label }}</div>{% else %}<span class="muted">無</span>{% endfor %}</td></tr>
+    </tbody></table></div>
+</section>
+<div class="card section confirm-bar">
+    <form method="post" action="{{ base }}/group-policy/{{ source }}">
+        <input type="hidden" name="confirmed" value="1">
+        {% if enforce %}<input type="hidden" name="enforce" value="1">{% endif %}
+        {% for option in selected %}<input type="hidden" name="allowed" value="{{ option.id }}">{% endfor %}
+        <button type="submit" class="btn primary">確認儲存</button>
+    </form>
+    <a class="btn" href="{{ base }}{{ info.page }}">取消</a>
+</div>
+{% endblock %}

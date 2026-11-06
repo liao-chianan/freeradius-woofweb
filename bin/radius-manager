@@ -1,0 +1,131 @@
+#!/usr/bin/python3 -I
+"""Administrator commands. Run as root on the server.
+
+  radius-manager version       show the installed version
+  radius-manager setup-url     print a new one-time link to the setup wizard
+  radius-manager reset-admin   set a new administrator password (asks twice)
+  radius-manager clear-ip      remove the web interface source IP restriction
+"""
+import getpass
+import hashlib
+import json
+import os
+import secrets
+import socket
+import subprocess
+import sys
+import tempfile
+
+from werkzeug.security import generate_password_hash
+
+ROOT = '/opt/radius-manager/current'
+ENV = '/etc/radius-manager/env'
+SETTINGS = '/var/lib/radius-manager/settings.json'
+MIN_PASSWORD = 12
+
+
+def load_env():
+    with open(ENV, encoding='utf-8') as f:
+        return dict(line.strip().split('=', 1) for line in f if '=' in line)
+
+
+def save_env(env):
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(ENV))
+    with os.fdopen(fd, 'w', encoding='utf-8') as f:
+        f.writelines(f'{k}={v}\n' for k, v in env.items())
+    st = os.stat(ENV)
+    os.chown(tmp, st.st_uid, st.st_gid)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, ENV)
+
+
+def load_settings():
+    try:
+        with open(SETTINGS, encoding='utf-8') as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def primary_ip():
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.connect(('192.0.2.1', 9))
+        return probe.getsockname()[0]
+    except OSError:
+        return '<server-ip>'
+    finally:
+        probe.close()
+
+
+WEB_ENV = '/etc/radius-manager/web.env'
+
+
+def web_address():
+    """https://IP:port/前綴，port 與前綴在安裝時寫入 web.env。"""
+    values = {'FLASK_RADIUS_PORT': '3333', 'FLASK_RADIUS_PREFIX': '/woofradius'}
+    try:
+        with open(WEB_ENV, encoding='utf-8') as f:
+            for line in f:
+                key, sep, value = line.strip().partition('=')
+                if sep and key in values:
+                    values[key] = value.strip()
+    except OSError:
+        pass
+    return f"https://{primary_ip()}:{values['FLASK_RADIUS_PORT']}{values['FLASK_RADIUS_PREFIX'].rstrip('/')}"
+
+
+def setup_url():
+    if load_settings().get('setup_done'):
+        sys.exit('Setup is already complete. Sign in at the web interface.')
+    env = load_env()
+    if env.get('ADMIN_PASSWORD_HASH'):
+        sys.exit('The administrator already exists. Sign in to continue the setup wizard, or run: radius-manager reset-admin')
+    token = secrets.token_urlsafe(24)
+    env['SETUP_TOKEN_HASH'] = hashlib.sha256(token.encode()).hexdigest()
+    save_env(env)
+    print(f'{web_address()}/setup?token={token}')
+
+
+def reset_admin():
+    env = load_env()
+    if not env.get('ADMIN_USERNAME'):
+        sys.exit('No administrator yet. Use: radius-manager setup-url')
+    first = getpass.getpass(f'New password for {env["ADMIN_USERNAME"]}: ')
+    if len(first) < MIN_PASSWORD:
+        sys.exit(f'The password must be at least {MIN_PASSWORD} characters.')
+    if first != getpass.getpass('Repeat: '):
+        sys.exit('The passwords do not match.')
+    env['ADMIN_PASSWORD_HASH'] = generate_password_hash(first)
+    save_env(env)
+    print('Password updated. Existing sign-ins were signed out.')
+
+
+def clear_ip():
+    settings = load_settings()
+    settings.pop('allowed_cidrs', None)
+    st = os.stat(SETTINGS)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(SETTINGS))
+    with os.fdopen(fd, 'w', encoding='utf-8') as f:
+        json.dump(settings, f, indent=0, sort_keys=True)
+    os.chown(tmp, st.st_uid, st.st_gid)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, SETTINGS)
+    print('The source IP restriction was removed. It takes effect immediately.')
+
+
+if __name__ == '__main__':
+    command = sys.argv[1] if len(sys.argv) > 1 else ''
+    if command == 'version':
+        with open(f'{ROOT}/VERSION', encoding='utf-8') as f:
+            print(f.read().strip())
+    elif os.geteuid() != 0:
+        sys.exit('must run as root')
+    elif command == 'setup-url':
+        setup_url()
+    elif command == 'reset-admin':
+        reset_admin()
+    elif command == 'clear-ip':
+        clear_ip()
+    else:
+        sys.exit(__doc__)

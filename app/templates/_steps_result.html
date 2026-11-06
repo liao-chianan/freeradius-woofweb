@@ -1,0 +1,9 @@
+{% if res %}
+  {% if res.error %}<div class="notice error" role="alert">{{ res.error }}</div>{% endif %}
+  {% if res.message %}<div class="notice {{ 'success' if res.ok else 'error' }}" role="status">{{ res.message }}</div>{% endif %}
+  {% if res.steps %}
+  <ul class="step-list">
+    {% for item in res.steps %}<li class="{{ 'ok' if item.ok else 'fail' }}">{{ item.name }}{% if item.detail %}<small>{{ item.detail }}</small>{% endif %}</li>{% endfor %}
+  </ul>
+  {% endif %}
+{% endif %}

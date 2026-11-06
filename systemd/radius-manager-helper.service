@@ -1,0 +1,8 @@
+[Unit]
+Description=RADIUS manager privileged helper
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=/opt/radius-manager/current/bin/radius-manager-helper process
+TimeoutStartSec=300

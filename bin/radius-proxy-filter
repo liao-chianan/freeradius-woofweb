@@ -1,0 +1,46 @@
+#!/usr/bin/python3 -I
+"""Proxy 代理的帳號過濾：radius-proxy-filter <macauth 目錄> <帳號的 hex>。由 inner-tunnel 在轉送外部 RADIUS 之前呼叫。
+輸出 allow|外層|內層（可以轉送，外層 PEAP 或 TTLS，內層 MSCHAPv2、PAP 或 GTC）、blacklist（符合黑名單關鍵字）、notlisted（白名單有內容但都不符合）或 off（沒有設定外部 RADIUS）。
+關鍵字是「包含」比對、不分大小寫，比對裝置送出的完整帳號（含 @ 之後）。黑名單優先；白名單留白代表不限制。
+與其他檢查不同，這裡出錯一律不轉送：FreeRADIUS 只在輸出 allow 時轉送，影響範圍只有 Proxy SSID。"""
+import json
+import re
+import os
+import sys
+
+
+METHODS = {('PEAP', 'MSCHAPv2'), ('PEAP', 'GTC'), ('TTLS', 'PAP'), ('TTLS', 'MSCHAPv2'), ('TTLS', 'GTC')}
+
+
+def method(config):
+    outer, inner = config.get('outer', 'PEAP'), config.get('inner', 'MSCHAPv2')
+    if (outer, inner) not in METHODS:
+        raise ValueError(f'bad method {outer}/{inner}')
+    return outer, inner
+
+
+def decide(directory, account):
+    with open(os.path.join(directory, 'proxy-filter.json'), encoding='utf-8') as f:
+        config = json.load(f)
+    if config.get('enabled') is not True:
+        return 'off'
+    name = account.strip().lower()
+    if not name:
+        return 'notlisted'
+    if any(str(word).lower() in name for word in config['blacklist'] if str(word)):
+        return 'blacklist'
+    whitelist = [str(word).lower() for word in config['whitelist'] if str(word)]
+    if whitelist and not any(word in name for word in whitelist):
+        return 'notlisted'
+    return 'allow|%s|%s' % method(config)
+
+
+if __name__ == '__main__':
+    try:
+        print(decide(sys.argv[1], bytes.fromhex(sys.argv[2] if len(sys.argv) > 2 else '').decode('utf-8', 'replace')))
+    except FileNotFoundError:
+        print('off')
+    except Exception as e:
+        print(f'radius-proxy-filter: {e}', file=sys.stderr)
+        print('error')
+    sys.exit(0)

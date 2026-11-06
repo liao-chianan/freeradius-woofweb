@@ -1,0 +1,12 @@
+[Unit]
+Description=Export AD accounts, names and status for radius-manager
+After=winbind.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/radius-manager/current/bin/radius-manager-ad-status
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/radius-manager /var/log/freeradius/macauth /var/lib/samba /var/cache/samba /run/samba

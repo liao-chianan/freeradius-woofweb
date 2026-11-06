@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}AP 清單確認 - radius 登入管理{% endblock %}
+{% block content %}
+<div class="toolbar"><div class="toolbar-title"><h1>AP 清單確認</h1>
+    {% if mode %}<span class="count">{{ '完全取代' if mode == 'replace' else '合併' }}</span>{% endif %}</div></div>
+{% if errors %}
+<section class="card section">
+    <div class="notice error" role="alert">檢核未通過，AP 清單沒有任何變更。</div>
+    <ul>{% for e in errors %}<li>{{ e }}</li>{% endfor %}</ul>
+    <a class="btn" href="{{ base }}/ap">返回 AP 清單</a>
+</section>
+{% else %}
+<div class="stats">
+    <div class="stat good"><b>{{ plan.added|length }}</b><span>新增</span></div>
+    <div class="stat warn"><b>{{ plan.changed|length }}</b><span>修改</span></div>
+    <div class="stat bad"><b>{{ plan.deleted|length }}</b><span>刪除</span></div>
+    <div class="stat"><b>{{ plan.unchanged }}</b><span>不變</span></div>
+</div>
+{% if plan.added %}
+<section class="card section"><h2>新增 {{ plan.added|length }} 筆</h2><div class="table-wrap"><table class="compact">
+    <thead><tr><th>裝置名稱</th><th>IP</th><th>MAC</th></tr></thead>
+    <tbody>{% for a in plan.added %}<tr><td>{{ a.name }}</td><td class="mono">{{ a.ip }}</td><td class="mono">{{ a.mac }}</td></tr>{% endfor %}</tbody>
+</table></div></section>
+{% endif %}
+{% if plan.changed %}
+<section class="card section"><h2>修改 {{ plan.changed|length }} 筆</h2><div class="table-wrap"><table class="compact">
+    <thead><tr><th>裝置（修改前）</th><th>欄位</th><th>修改前</th><th>修改後</th></tr></thead>
+    <tbody>{% for c in plan.changed %}{% for field, values in c.changes.items() %}
+    <tr><td>{{ c.before.name }}</td><td>{{ labels[field] }}</td><td class="mono old">{{ values[0] }}</td><td class="mono new">{{ values[1] }}</td></tr>
+    {% endfor %}{% endfor %}</tbody>
+</table></div></section>
+{% endif %}
+{% if plan.deleted %}
+<section class="card section"><h2>刪除 {{ plan.deleted|length }} 筆</h2><div class="table-wrap"><table class="compact">
+    <thead><tr><th>裝置名稱</th><th>IP</th><th>MAC</th></tr></thead>
+    <tbody>{% for a in plan.deleted %}<tr><td>{{ a.name }}</td><td class="mono">{{ a.ip }}</td><td class="mono">{{ a.mac }}</td></tr>{% endfor %}</tbody>
+</table></div></section>
+{% endif %}
+{% if has_changes %}
+<div class="card section confirm-bar">
+    <p>確認後會先備份再更新清單。這份清單只用來比對登入紀錄，不會重啟 FreeRADIUS，也不影響認證。</p>
+    <div class="dialog-actions">
+        <form method="post" action="{{ base }}/ap/cancel"><input type="hidden" name="token" value="{{ token }}"><button class="btn" type="submit">取消</button></form>
+        <form method="post" action="{{ base }}/ap/commit"><input type="hidden" name="token" value="{{ token }}"><input type="hidden" name="confirmed" value="1">
+            <button class="btn {{ 'danger' if plan.deleted else 'primary' }}" type="submit">確認執行</button></form>
+    </div>
+</div>
+{% else %}
+<div class="notice success" role="status">檔案內容與目前清單相同，不需要變更。</div>
+<a class="btn" href="{{ base }}/ap">返回 AP 清單</a>
+{% endif %}
+{% endif %}
+{% endblock %}

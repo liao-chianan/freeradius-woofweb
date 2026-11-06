@@ -1,0 +1,95 @@
+#!/usr/bin/python3 -I
+"""以 Secure LDAP 用戶端的存取憑證唯讀查詢 Google 機構與使用者，寫成檔案給管理介面顯示（服務本身讀不到憑證）。
+只供顯示：Wi-Fi 判斷用的是登入當下 LDAP 查到的 DN，不是這個檔案。查詢失敗或沒有資料就保留舊檔；尚未設定或已停用就刪除舊檔（內有個資）。"""
+import base64
+import json
+import os
+import pwd
+import re
+import subprocess
+import sys
+import tempfile
+import time
+
+OUT = os.environ.get('GOOGLE_DIR_FILE', '/var/lib/radius-manager/google_directory.json')
+RADDB = '/etc/freeradius/3.0'
+LDIF_LINE = re.compile(r'^([A-Za-z]+)(::?) (.*)$')
+
+
+def unescape_dn(value):
+    def repl(match):
+        text = match.group(1)
+        return bytes.fromhex(text.decode()) if len(text) == 2 else text
+    return re.sub(rb'\\([0-9A-Fa-f]{2}|.)', repl, value.encode(), flags=re.S).decode('utf-8', 'replace')
+
+
+def ou_path(dn):
+    """ou=A班,ou=四年級,ou=Users,dc=x 回傳「四年級/A班」，ou=Users 回傳空字串，不在 ou=Users 底下回傳 None。"""
+    ous = [unescape_dn(part[3:]).strip() for part in re.findall(r'(?:[^,\\]|\\.)+', dn) if part[:3].lower() == 'ou=']
+    ous.reverse()
+    if not ous or ous[0].lower() != 'users':
+        return None
+    return '/'.join(ous[1:])
+
+
+def parse_ldif(text):
+    for block in text.split('\n\n'):
+        entry = {}
+        for line in block.splitlines():
+            match = LDIF_LINE.match(line)
+            if match:
+                value = base64.b64decode(match[3]).decode('utf-8', 'replace') if match[2] == '::' else match[3]
+                entry.setdefault(match[1].lower(), value)
+        if 'dn' in entry:
+            yield entry
+
+
+def search(values, password_file, ldap_filter, *attrs):
+    env = {'LDAPTLS_CERT': f'{RADDB}/certs/ldap-client.crt', 'LDAPTLS_KEY': f'{RADDB}/certs/ldap-client.key', 'LDAPTLS_REQCERT': 'demand'}
+    result = subprocess.run(['ldapsearch', '-LLL', '-x', '-E', 'pr=500/noprompt', '-o', 'nettimeout=10', '-o', 'ldif-wrap=no',
+                             '-H', 'ldaps://ldap.google.com:636', '-D', values['identity'], '-y', password_file, '-b', values['base_dn'],
+                             ldap_filter, *attrs], capture_output=True, text=True, errors='replace', timeout=170, env=env)
+    if result.returncode != 0:
+        sys.exit(f'ldapsearch failed: exit {result.returncode}')
+    return list(parse_ldif(result.stdout))
+
+
+def main():
+    try:
+        with open(f'{RADDB}/ldap-google.conf', encoding='utf-8') as f:
+            values = dict(re.findall(r'^(identity|password|base_dn) = "(.*)"$', f.read(), re.M))
+    except FileNotFoundError:
+        values = {}
+    if len(values) != 3 or values['identity'] == 'not-configured':
+        if os.path.exists(OUT):
+            os.unlink(OUT)
+        return
+    with tempfile.NamedTemporaryFile('w', encoding='utf-8') as pw:
+        os.fchmod(pw.fileno(), 0o600)
+        pw.write(values['password'])
+        pw.flush()
+        ou_entries = search(values, pw.name, '(objectClass=organizationalUnit)', 'dn')
+        user_entries = search(values, pw.name, '(objectClass=person)', 'mail', 'displayName')
+    ous = {path for path in (ou_path(e['dn']) for e in ou_entries) if path is not None}
+    users = []
+    for entry in user_entries:
+        path = ou_path(entry['dn'])
+        if path is not None and entry.get('mail'):
+            users.append({'email': entry['mail'], 'name': entry.get('displayname', ''), 'ou': path})
+            ous.add(path)
+    if not users:
+        sys.exit('no users found')
+    owner = pwd.getpwnam('radmgr')
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(OUT))
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump({'time': int(time.time()), 'ous': sorted(ous), 'users': users}, f, ensure_ascii=False)
+            os.fchown(f.fileno(), owner.pw_uid, owner.pw_gid)
+        os.replace(tmp, OUT)
+    except Exception:
+        os.unlink(tmp)
+        raise
+
+
+if __name__ == '__main__':
+    main()

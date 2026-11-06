@@ -1,0 +1,146 @@
+{% extends "base.html" %}
+{% block title %}初始化設定 - radius 登入管理{% endblock %}
+{% block page_class %}narrow{% endblock %}
+{% block content %}
+<ol class="setup-steps">
+  {% for key, label in steps %}<li class="{{ 'now' if key == step else 'done' if loop.index0 < index }}">{{ loop.index }}. {{ label }}</li>{% endfor %}
+</ol>
+<section class="card">
+  {% if error %}<div class="notice error" role="alert">{{ error }}</div>{% endif %}
+  {% if step == 'org' %}
+    <h1>單位資料</h1>
+    <form method="POST" class="stack" autocomplete="off">
+      <label>單位名稱<input name="org_name" value="{{ settings.get('org_name', '') }}" maxlength="60" required autofocus>
+        <small class="muted">顯示在每一頁的左上角。</small></label>
+      <label>時區
+        <select name="timezone">{% for tz in timezones %}<option value="{{ tz }}" {{ 'selected' if tz == settings.get('timezone', 'Asia/Taipei') }}>{{ tz }}</option>{% endfor %}</select>
+        <small class="muted">登入紀錄與裝置數重置都依這個時區。AD 也要求主機時間正確。</small></label>
+      <div class="setup-actions"><span></span><button class="btn primary">下一步</button></div>
+    </form>
+  {% elif step == 'admin' %}
+    <h1>管理者帳號</h1>
+    <p class="muted">建立後，之後都用這組帳號登入，這個一次性連結也會失效。</p>
+    <form method="POST" class="stack">
+      <label>帳號<input name="username" value="{{ username or '' }}" autocomplete="username" required autofocus></label>
+      <label>密碼<input type="password" name="password" minlength="{{ min_length }}" autocomplete="new-password" required>
+        <small class="muted">至少 {{ min_length }} 個字元，包含大寫、小寫、數字、符號其中至少三種，且不可包含帳號。</small></label>
+      <label>確認密碼<input type="password" name="confirm_password" autocomplete="new-password" required></label>
+      <div class="setup-actions"><a class="btn" href="{{ base }}/setup/org">上一步</a><button class="btn primary">建立並繼續</button></div>
+    </form>
+  {% elif step == 'access' %}
+    <h1>限制來源 IP</h1>
+    <p class="muted">只有清單內的 IP 可以連線到這個管理介面。目前連線的 IP 是 <span class="mono">{{ client_ip }}</span>，已預先填入。留白表示不限制。</p>
+    <form method="POST" class="stack">
+      <label>允許的 IP 或 CIDR
+        <textarea name="allowed_cidrs" rows="5" class="mono" spellcheck="false">{{ cidrs }}</textarea>
+        <small class="muted">一行一筆，例如 192.168.1.0/24。被鎖在外面時，在主機執行 sudo radius-manager clear-ip。</small></label>
+      <div class="setup-actions"><a class="btn" href="{{ base }}/setup/admin">上一步</a><button class="btn primary">下一步</button></div>
+    </form>
+  {% elif step == 'radius' %}
+    <h1>RADIUS 用戶端</h1>
+    <p class="muted">Wi-Fi 控制器或 AP 用這組 secret 連線。請把下面的值填到控制器的 RADIUS 設定，驗證埠 1812。</p>
+    <form method="POST" class="stack" autocomplete="off">
+      <label>RADIUS secret<input name="radius_secret" class="mono" value="{{ secret }}" required>
+        <small class="muted">預設是隨機產生的 8 碼，可以自行修改，建議加長。</small></label>
+      <label>允許的網段
+        <textarea name="radius_networks" rows="3" class="mono" spellcheck="false">{{ networks }}</textarea>
+        <small class="muted">一行一筆，例如 192.168.1.0/24。0.0.0.0 代表任何來源都能送認證請求，上線前建議改成控制器與 AP 的網段。</small></label>
+      <div class="setup-actions"><a class="btn" href="{{ base }}/setup/access">上一步</a><button class="btn primary">套用並繼續</button></div>
+    </form>
+  {% elif step == 'ad' %}
+    <h1>AD 帳號驗證</h1>
+    {% set res = result %}{% include "_steps_result.html" %}
+    {% if verified %}
+      <div class="notice success" role="status">AD 帳號驗證已啟用。</div>
+      <form method="POST"><input type="hidden" name="action" value="skip"><div class="setup-actions"><span></span><button class="btn primary">下一步</button></div></form>
+    {% else %}
+      <p class="muted">讓員工用 AD 帳號連 Wi-Fi（PEAP-MSCHAPv2）。不需要可以跳過，之後到系統設定再開啟。</p>
+      <form method="POST" class="stack" autocomplete="off">
+        {% set values = form or {} %}{% include "_ad_fields.html" %}
+        <div class="setup-actions">
+          <a class="btn" href="{{ base }}/setup/radius">上一步</a>
+          <div class="group">
+            <button class="btn" name="action" value="skip" formnovalidate>跳過</button>
+            <button class="btn primary" name="action" value="verify">驗證並啟用</button>
+          </div>
+        </div>
+      </form>
+    {% endif %}
+  {% elif step == 'google' %}
+    <h1>Google 帳號驗證</h1>
+    {% set res = result %}{% include "_steps_result.html" %}
+    {% if verified %}
+      <div class="notice success" role="status">Google 帳號驗證已啟用。</div>
+      <form method="POST"><input type="hidden" name="action" value="skip"><div class="setup-actions"><span></span><button class="btn primary">下一步</button></div></form>
+    {% else %}
+      <p class="muted">讓使用者用 Google Workspace 帳號連 Wi-Fi，帳號要填完整 email。不需要可以跳過，之後到系統設定再開啟。</p>
+      <form method="POST" class="stack" enctype="multipart/form-data" autocomplete="off">
+        {% set values = form or {} %}{% include "_google_fields.html" %}
+        <div class="setup-actions">
+          <a class="btn" href="{{ base }}/setup/ad">上一步</a>
+          <div class="group">
+            <button class="btn" name="action" value="skip" formnovalidate>跳過</button>
+            <button class="btn primary" name="action" value="verify">驗證並啟用</button>
+          </div>
+        </div>
+      </form>
+    {% endif %}
+  {% elif step == 'cert' %}
+    <h1>RADIUS 伺服器憑證</h1>
+    <p class="muted">裝置連 Wi-Fi 時會看到這張憑證，名稱就是使用者要核對的伺服器名稱。安裝時已先產生一張暫時的自簽憑證。</p>
+    {% if cert_info %}<pre class="cert-info">{{ cert_info }}</pre>{% endif %}
+    <form method="POST" class="stack" enctype="multipart/form-data" autocomplete="off">
+      <label>伺服器名稱（FQDN）<input name="fqdn" value="{{ fqdn or settings.get('radius_fqdn', '') }}" placeholder="radius.example.org"></label>
+      <label>憑證方式
+        <select name="cert_mode"><option value="self_signed">產生自簽憑證</option><option value="upload">上傳憑證（建議用公開 CA）</option></select>
+        <small class="muted">公開 CA 憑證讓裝置比較容易信任，並能避免使用者接受假 AP 的憑證。Google 驗證的密碼會進入這個加密通道，請特別注意。</small></label>
+      <div class="field-grid">
+        <label>完整憑證鏈 fullchain<input type="file" name="cert_file" accept=".pem,.crt"></label>
+        <label>私鑰 privkey<input type="file" name="key_file" accept=".pem,.key"></label>
+      </div>
+      <div class="setup-actions">
+        <a class="btn" href="{{ base }}/setup/google">上一步</a>
+        <div class="group">
+          <button class="btn" name="action" value="skip" formnovalidate>先用目前的憑證</button>
+          <button class="btn primary" name="action" value="apply">套用並繼續</button>
+        </div>
+      </div>
+    </form>
+  {% elif step == 'ssid' %}
+    <h1>SSID 規則</h1>
+    <p class="muted">由上而下比對，SSID 包含關鍵字（不分大小寫）就用該列的驗證方式。已依剛才的選擇預填。VLAN 留白時，名單用裝置各自的值，其他不發 VLAN。</p>
+    <form method="POST" class="stack" autocomplete="off">
+      {% set rows = rules.rules %}
+      <div class="table-wrap"><table class="ssid-table">
+        <thead><tr><th>SSID 關鍵字</th><th class="auth-col">驗證方式</th><th class="vlan-col">VLAN</th></tr></thead>
+        <tbody>
+        {% for i in range(6) %}{% set row = rows[i] if i < rows|length else {'keyword': '', 'auth': 'mac', 'vlan': ''} %}
+          <tr><td><input name="keyword" value="{{ row.keyword }}"></td>
+            <td><select name="auth">{% for key, label in auth_labels.items() %}<option value="{{ key }}" {{ 'selected' if key == row.auth }}>{{ label }}</option>{% endfor %}</select></td>
+            <td><input name="vlan" value="{{ row.vlan }}" inputmode="numeric"></td></tr>
+        {% endfor %}
+        </tbody>
+      </table></div>
+      <div class="field-grid">
+        <label>沒有吻合時
+          <select name="default_auth">{% for key, label in auth_labels.items() %}<option value="{{ key }}" {{ 'selected' if key == rules.default.auth }}>{{ label }}</option>{% endfor %}</select></label>
+        <label>沒有吻合時的 VLAN<input name="default_vlan_rule" value="{{ rules.default.vlan }}" inputmode="numeric"></label>
+        <label>名單裝置的預設 VLAN<input name="default_vlan" value="{{ default_vlan }}" inputmode="numeric" required>
+          <small class="muted">新增放行裝置時預填的 VLAN。</small></label>
+      </div>
+      <div class="setup-actions"><a class="btn" href="{{ base }}/setup/cert">上一步</a><button class="btn primary">下一步</button></div>
+    </form>
+  {% elif step == 'finish' %}
+    <h1>完成</h1>
+    <div class="notice success" role="status">基本設定已完成。</div>
+    <p><strong>剛才的設定都可以到「系統設定 → 主機與驗證設定」變更，也可以在那裡再次驗證 AD 帳號與 Google 帳號。</strong></p>
+    <ul>
+      <li>單位名稱：{{ settings.get('org_name') }}</li>
+      <li>AD 帳號驗證：{{ '已啟用' if settings.get('ad_enabled') else '未啟用' }}</li>
+      <li>Google 帳號驗證：{{ '已啟用' if settings.get('google_enabled') else '未啟用' }}</li>
+    </ul>
+    <p class="muted">接下來請到 Wi-Fi 控制器設定 RADIUS 伺服器（這台主機的 IP、驗證埠 1812、剛才的 secret），SSID 選 WPA2/WPA3-Enterprise，並開啟動態 VLAN（如有使用）。AD 登入需要這台主機的網路能連到網域控制站。</p>
+    <form method="POST"><div class="setup-actions"><a class="btn" href="{{ base }}/setup/ssid">上一步</a><button class="btn primary">開始使用</button></div></form>
+  {% endif %}
+</section>
+{% endblock %}

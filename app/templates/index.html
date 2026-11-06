@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block content %}
+{% if problems %}
+<section class="card section check-alert" role="alert">
+    <h2>資料檢核：名單檔格式異常 <span class="count warning">{{ problems|length }} 處</span></h2>
+    <p class="muted">修正前暫停所有寫入，請由管理者直接檢查 authorized_macs。</p>
+    <ul>{% for p in problems %}<li>{{ p }}</li>{% endfor %}</ul>
+</section>
+{% endif %}
+{% if not duplicates.ids and not duplicates.macs and not problems %}
+<div class="notice success" role="status">資料檢核：{{ entries|length }} 筆資料都通過，沒有重複的裝置名稱或 MAC。</div>
+{% endif %}
+{% for title, groups in (('重複的裝置名稱', duplicates.ids), ('重複的 MAC', duplicates.macs)) %}
+{% if groups %}
+<section class="card section check-alert" role="status">
+    <h2>資料檢核：{{ title }} <span class="count warning">{{ groups|length }} 組</span></h2>
+    <div class="table-wrap">
+    <table>
+        <thead><tr><th>裝置名稱</th><th>MAC</th><th>VLAN</th><th>異動日期</th><th>最近登入</th><th class="actions-col">操作</th></tr></thead>
+        {% for group in groups %}
+        <tbody class="dup-group">
+            {% for e in group %}{% include "row.html" %}{% endfor %}
+        </tbody>
+        {% endfor %}
+    </table>
+    </div>
+</section>
+{% endif %}
+{% endfor %}
+<div class="toolbar">
+    <div class="toolbar-title"><h1>放行裝置清單</h1><span class="count" id="row-count">共 {{ entries|length }} 筆</span></div>
+    <input type="search" id="filter" placeholder="搜尋裝置名稱、MAC 或日期" aria-label="搜尋">
+    <div class="toolbar-actions">
+        <a class="btn" href="{{ base }}/export">匯出 CSV</a>
+        <button type="button" class="btn" id="open-import">匯入 CSV</button>
+        <button type="button" class="btn primary" id="open-add">新增裝置</button>
+    </div>
+</div>
+<div class="table-wrap card">
+    <table id="entries">
+        <thead>
+            <tr>
+                <th data-sort="id" aria-sort="none">裝置名稱</th>
+                <th data-sort="mac" aria-sort="none">MAC</th>
+                <th data-sort="group" aria-sort="none">VLAN</th>
+                <th data-sort="modified" aria-sort="none">異動日期</th>
+                <th data-sort="last" aria-sort="none">最近登入</th>
+                <th class="actions-col">操作</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for e in entries %}
+            {% include "row.html" %}
+            {% endfor %}
+        </tbody>
+    </table>
+    <p class="empty" id="empty" hidden>找不到符合的資料</p>
+</div>
+{% include "dialogs.html" %}
+{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='app.js') }}"></script>{% endblock %}

@@ -1,0 +1,128 @@
+#!/usr/bin/python3 -I
+"""裝置上限：radius-device-limit <帳號> <裝置 MAC> <macauth 目錄>。由 FreeRADIUS 在內層驗證成功後呼叫。
+超過上限時輸出 deny，其餘情況不輸出。任何錯誤都放行：這支程式壞掉不可讓全校無法登入 Wi-Fi。
+週期從 00:00 起算且能整除 24，不會跨日，所以資料仍以日為單位，週期內的裝置以 last_ts 判斷。
+另有 --migrate <macauth 目錄>：加上 last_ts 欄位並由今天的登入紀錄補值，只在部署時用一次。"""
+import glob
+import json
+import os
+import re
+import sqlite3
+import sys
+import time
+
+DEFAULT_LIMIT = 3
+DEFAULT_WINDOW = 24
+WINDOW_CHOICES = (1, 2, 3, 4, 6, 8, 12, 24)
+KEEP_DAYS = 30
+MAC_RE = re.compile(r'([0-9A-F]{2}-){5}[0-9A-F]{2}')
+
+
+def normalize_account(value):
+    value = value.strip()
+    if '\\' in value:
+        value = value.rsplit('\\', 1)[1]
+    if '@' in value:
+        value = value.split('@', 1)[0]
+    return value.lower()
+
+
+def open_db(directory):
+    os.umask(0o027)
+    conn = sqlite3.connect(os.path.join(directory, 'device-limit.db'), timeout=3, isolation_level=None)
+    conn.execute('CREATE TABLE IF NOT EXISTS devices (day TEXT NOT NULL, account TEXT NOT NULL, mac TEXT NOT NULL, first_ts INTEGER NOT NULL, last_ts INTEGER, PRIMARY KEY (day, account, mac))')
+    conn.execute('CREATE TABLE IF NOT EXISTS denied (day TEXT NOT NULL, account TEXT NOT NULL, mac TEXT NOT NULL, count INTEGER NOT NULL, last_ts INTEGER NOT NULL, PRIMARY KEY (day, account, mac))')
+    return conn
+
+
+def load_config(directory):
+    try:
+        with open(os.path.join(directory, 'device-limit.json'), encoding='utf-8') as f:
+            config = json.load(f)
+    except FileNotFoundError:
+        return {'limit': DEFAULT_LIMIT, 'exempt': set(), 'window': DEFAULT_WINDOW, 'reset_all': 0, 'resets': {}}
+    window = int(config.get('window_hours', DEFAULT_WINDOW))
+    return {'limit': int(config['limit']),
+            'exempt': {normalize_account(a) for a in config.get('exempt', [])},
+            'window': window if window in WINDOW_CHOICES else DEFAULT_WINDOW,
+            'reset_all': int(config.get('reset_all', 0)),
+            'resets': config.get('resets', {})}
+
+
+def period_start(now, window):
+    t = time.localtime(now)
+    return int(time.mktime((t.tm_year, t.tm_mon, t.tm_mday, t.tm_hour // window * window, 0, 0, 0, 0, -1)))
+
+
+def check(account, mac, directory):
+    """回傳 True 表示放行。不限制與排除的帳號也要記錄，中途開啟上限時數字才正確。"""
+    account = normalize_account(account)
+    mac = mac.strip().upper().replace(':', '-')
+    if not account or not MAC_RE.fullmatch(mac):
+        return True
+    config = load_config(directory)
+    limit, exempt = config['limit'], config['exempt']
+    now = int(time.time())
+    start = max(period_start(now, config['window']), config['reset_all'], int(config['resets'].get(account, 0)))
+    day = time.strftime('%Y-%m-%d', time.localtime(now))
+    conn = open_db(directory)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        allowed = True
+        known = conn.execute('SELECT 1 FROM devices WHERE day = ? AND account = ? AND mac = ? AND COALESCE(last_ts, first_ts) >= ?',
+                             (day, account, mac, start)).fetchone()
+        if not known:
+            used = conn.execute('SELECT COUNT(*) FROM devices WHERE day = ? AND account = ? AND COALESCE(last_ts, first_ts) >= ?',
+                                (day, account, start)).fetchone()[0]
+            if limit > 0 and account not in exempt and used >= limit:
+                allowed = False
+                conn.execute('INSERT INTO denied (day, account, mac, count, last_ts) VALUES (?, ?, ?, 1, ?) '
+                             'ON CONFLICT (day, account, mac) DO UPDATE SET count = CASE WHEN last_ts < ? THEN 1 ELSE count + 1 END, last_ts = excluded.last_ts',
+                             (day, account, mac, now, start))
+        if allowed:
+            conn.execute('INSERT INTO devices (day, account, mac, first_ts, last_ts) VALUES (?, ?, ?, ?, ?) '
+                         'ON CONFLICT (day, account, mac) DO UPDATE SET last_ts = excluded.last_ts', (day, account, mac, now, now))
+        cutoff = time.strftime('%Y-%m-%d', time.localtime(now - KEEP_DAYS * 86400))
+        conn.execute('DELETE FROM devices WHERE day < ?', (cutoff,))
+        conn.execute('DELETE FROM denied WHERE day < ?', (cutoff,))
+        conn.execute('COMMIT')
+        return allowed
+    finally:
+        conn.close()
+
+
+def migrate(directory):
+    today = time.strftime('%Y-%m-%d')
+    conn = open_db(directory)
+    if 'last_ts' not in [row[1] for row in conn.execute('PRAGMA table_info(devices)')]:
+        conn.execute('ALTER TABLE devices ADD COLUMN last_ts INTEGER')
+    updated = 0
+    for path in sorted(glob.glob(os.path.join(directory, 'ad-*.log'))):
+        with open(path, errors='replace') as f:
+            for line in f:
+                parts = line.rstrip('\n').split('|', 5)
+                if len(parts) < 3 or not parts[0].isdigit():
+                    continue
+                ts = int(parts[0])
+                mac = parts[2].upper()
+                if time.strftime('%Y-%m-%d', time.localtime(ts)) == today and MAC_RE.fullmatch(mac):
+                    updated += conn.execute('INSERT INTO devices (day, account, mac, first_ts, last_ts) VALUES (?, ?, ?, ?, ?) '
+                                            'ON CONFLICT (day, account, mac) DO UPDATE SET last_ts = MAX(COALESCE(last_ts, 0), excluded.last_ts)',
+                                            (today, normalize_account(parts[1]), mac, ts, ts)).rowcount
+    conn.close()
+    print(f'migrated {updated} log lines')
+
+
+def main():
+    if sys.argv[1] == '--migrate':
+        migrate(sys.argv[2])
+    elif not check(sys.argv[1], sys.argv[2], sys.argv[3]):
+        print('deny')
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except Exception as e:
+        print(f'radius-device-limit: {e}', file=sys.stderr)
+    sys.exit(0)

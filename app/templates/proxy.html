@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+{% block title %}Proxy 代理 - radius 登入管理{% endblock %}
+{% block content %}
+<div class="toolbar"><div class="toolbar-title"><h1>Proxy 代理</h1>
+    <span class="count">{% if info %}外部 RADIUS {{ info.server }}:{{ info.port }}{% else %}尚未設定外部 RADIUS{% endif %}</span></div></div>
+<p class="muted">讓外部單位的帳號連上本校 Wi-Fi：裝置以下方設定的驗證方式連到本機，本機確認帳號符合黑白名單後，把內層的驗證轉給外部 RADIUS，由外部判斷帳號密碼。
+    哪些 SSID 走 Proxy 代理、指派哪個 VLAN，在 <a href="{{ base }}/ssid">SSID 驗證與 VLAN</a> 頁的規則選「Proxy 代理」。外部 RADIUS 回覆的屬性（例如它自己的 VLAN）不會轉給 AP，VLAN 以本校規則為準。</p>
+{% if filter_error %}<div class="notice error" role="alert">{{ filter_error }}</div>{% endif %}
+{% if (ssid_rules or default_proxy) and not info %}<div class="notice error" role="alert">有 SSID 規則使用 Proxy 代理，但尚未設定外部 RADIUS，這些 SSID 的登入會全部被拒絕。</div>{% endif %}
+
+<section class="card section">
+    <h2>外部 RADIUS</h2>
+    {% include "_steps_result.html" %}
+    {% if info %}<p>目前轉送到 <b>{{ info.server }}:{{ info.port }}</b>（{{ info.updated }} 設定），驗證方式 <b>{{ config.outer }} + {{ config.inner }}</b>。{% if source_ip %}外部 RADIUS 會看到本機以 <b class="mono">{{ source_ip }}</b> 連線，請把這個 IP 與相同的共用金鑰加入外部的 RADIUS 用戶端。{% endif %}</p>{% endif %}
+    <form method="POST" action="{{ base }}/proxy/server" class="stack" autocomplete="off">
+        <label>外部 RADIUS 位址
+            <input name="server" value="{{ values.server or (info.server if info else '') }}" required maxlength="253" spellcheck="false" placeholder="IP 或主機名稱">
+            <small class="muted">主機名稱只在 FreeRADIUS 啟動時解析一次，IP 變動後要重新儲存。</small></label>
+        <label>驗證連接埠
+            <input name="port" inputmode="numeric" value="{{ values.port or (info.port if info else '1812') }}" required></label>
+        <label>共用金鑰（shared secret）
+            <input type="password" name="secret" maxlength="128" autocomplete="new-password" {{ '' if info else 'required' }}>
+            <small class="muted">{% if info %}留白表示沿用目前的金鑰。{% endif %}6 到 128 個英數或符號，不可含空白、' 或 \。金鑰只存在 FreeRADIUS 設定檔，網頁不會再顯示。</small></label>
+        <div class="proxy-lists">
+            <label>外層（裝置與本機）
+                <select name="outer">{% for o in ['PEAP', 'TTLS'] %}<option value="{{ o }}" {{ 'selected' if (values.outer or config.outer) == o }}>{{ o }}</option>{% endfor %}</select></label>
+            <label>內層（轉給外部的驗證）
+                <select name="inner">{% for i in ['MSCHAPv2', 'PAP', 'GTC'] %}<option value="{{ i }}" {{ 'selected' if (values.inner or config.inner) == i }}>{{ i }}</option>{% endfor %}</select></label>
+        </div>
+        <p class="muted">{% if info %}目前的方式：{{ current_note }}{% endif %}
+            內層 MSCHAPv2 以 MS-CHAPv2 轉給外部；PAP 與 GTC 會在本機的加密通道內取得密碼，再以 PAP 轉給外部。PEAP 沒有 PAP。
+            外部回覆「不接受 MS-CHAPv2」時（帳號放在 LDAP、Google 等只能驗明文密碼的系統），請改用 TTLS + PAP，或 PEAP + GTC。
+            只改驗證方式不需重新啟動 FreeRADIUS，立即生效；設定與裝置不同的方式會被拒絕。</p>
+        <details class="method-notes"><summary>各種組合的裝置設定</summary><ul>
+            {% for o, i in methods %}<li><b>{{ o }} + {{ i }}</b>：{{ method_notes[o ~ '-' ~ i] }}</li>{% endfor %}</ul></details>
+        <label>測試帳號（選填）
+            <input name="test_user" maxlength="128" spellcheck="false" autocomplete="off">
+            <small class="muted">留白時用隨機帳號測試，外部回覆「拒絕」就代表連線與共用金鑰都正確。填寫時依上方選的內層，以 MS-CHAPv2 或 PAP 做一次驗證，與實際轉送的方式相同。</small></label>
+        <label>測試密碼
+            <input type="password" name="test_password" maxlength="256" autocomplete="new-password"></label>
+        <label class="check"><input type="checkbox" name="force" value="1"><span>測試失敗仍要套用（例如外部暫時連不上）</span></label>
+        <div class="actions">
+            <button type="submit" class="btn primary" name="action" value="save">測試並套用</button>
+            {% if info %}<button type="submit" class="btn" name="action" value="test" formnovalidate>只測試（不套用）</button>{% endif %}
+        </div>
+        <p class="muted">「只測試」用目前儲存的位址與共用金鑰，加上這裡選的內層方式。變更位址、連接埠或金鑰時 FreeRADIUS 會重新啟動，全校認證會中斷幾秒。內層 MSCHAPv2 時外部要接受一般（非 EAP）的 MS-CHAPv2：FreeRADIUS 預設接受；Windows NPS 要在網路原則的驗證方法勾選 MS-CHAP v2。</p>
+    </form>
+    {% if info %}
+    <form method="POST" action="{{ base }}/proxy/server" class="stack" data-confirm="確定要停用 Proxy 代理？共用金鑰會刪除，走 Proxy 代理的 SSID 會全部被拒絕。">
+        <input type="hidden" name="action" value="disable">
+        <div class="actions"><button type="submit" class="btn danger-outline">停用 Proxy 代理</button></div>
+    </form>
+    {% endif %}
+</section>
+
+<section class="card section">
+    <h2>使用 Proxy 代理的 SSID</h2>
+    {% if ssid_rules or default_proxy %}
+    <ul>
+        {% for r in ssid_rules %}<li>SSID 包含「<b>{{ r.keyword }}</b>」：{% if r.vlan %}VLAN {{ r.vlan }}{% else %}不發 VLAN{% endif %}</li>{% endfor %}
+        {% if default_proxy %}<li>沒有吻合任何關鍵字的 SSID：{% if default_vlan %}VLAN {{ default_vlan }}{% else %}不發 VLAN{% endif %}</li>{% endif %}
+    </ul>
+    {% else %}<p class="muted">目前沒有 SSID 規則使用 Proxy 代理。</p>{% endif %}
+    <p class="muted"><a href="{{ base }}/ssid">到 SSID 驗證與 VLAN 修改規則</a>。裝置要設定 {{ config.outer }}、內層 {{ config.inner }}，伺服器憑證是本機的憑證（不是外部的）。</p>
+</section>
+
+<section class="card section">
+    <h2>帳號黑白名單</h2>
+    <form method="POST" action="{{ base }}/proxy/filter" class="stack">
+        <p class="muted">比對裝置送出的內層帳號（也就是實際送去外部驗證的帳號，含 @ 之後），「包含」關鍵字即符合，不分大小寫，一行一個。
+            先看黑名單：符合就拒絕，不轉送。白名單留白表示不限制；有內容時，必須符合其中一個才轉送。例如白名單填 <code>@partner.edu.tw</code> 只允許該網域的帳號。
+            儲存後立即生效，不需重啟 FreeRADIUS。</p>
+        <div class="proxy-lists">
+            <label>白名單關鍵字
+                <textarea name="whitelist" rows="6" spellcheck="false">{{ config.whitelist|join('\n') }}</textarea></label>
+            <label>黑名單關鍵字
+                <textarea name="blacklist" rows="6" spellcheck="false">{{ config.blacklist|join('\n') }}</textarea></label>
+        </div>
+        <div class="actions"><button type="submit" class="btn primary">儲存黑白名單</button></div>
+    </form>
+</section>
+
+<div class="table-wrap card section">
+    <h2>登入成功紀錄</h2>
+    {% if accounts %}
+    <table class="compact">
+        <thead><tr><th>外部帳號</th><th>裝置 MAC</th><th>最近登入</th><th>登入次數</th><th>依目前黑白名單</th></tr></thead>
+        <tbody>{% for u in accounts %}<tr>
+            <td class="strong">{{ u.account }}</td>
+            <td class="mono">{% for mac in u.macs %}<div>{{ mac }}</div>{% else %}<span class="muted">-</span>{% endfor %}</td>
+            <td class="nowrap">{{ u.last }}</td>
+            <td>{{ u.logins }}</td>
+            <td class="nowrap">{% if u.decision == 'allow' %}{{ u.decision_label }}{% else %}<span class="status-off">{{ u.decision_label }}</span>{% endif %}</td>
+        </tr>{% endfor %}</tbody>
+    </table>
+    <p class="muted">每個帳號保留的筆數與 AD、Google 帳號相同（系統設定的登入紀錄筆數）。</p>
+    {% else %}<p class="muted">目前還沒有人經 Proxy 代理登入成功。</p>{% endif %}
+</div>
+
+<div class="table-wrap card section">
+    <h2>最近的驗證失敗</h2>
+    {% if failures %}
+    <table class="compact">
+        <thead><tr><th>連線時間</th><th>外部帳號</th><th>裝置 MAC</th><th>SSID</th><th>AP</th><th>失敗原因</th></tr></thead>
+        <tbody>{% for e in failures %}<tr>
+            <td class="nowrap">{{ e.time }}</td>
+            <td>{{ e.account or '-' }}</td>
+            <td class="mono nowrap">{{ e.mac or '-' }}</td>
+            <td>{{ e.ssid or '-' }}</td>
+            <td>{{ e.ap_name }}</td>
+            <td title="{{ e.detail }}">{{ e.reason }}</td>
+        </tr>{% endfor %}</tbody>
+    </table>
+    <p class="muted">只列最近 {{ recent_limit }} 筆。完整紀錄與統計請到 <a href="{{ base }}/failures?by=proxy">驗證失敗歷史</a>（依外部帳號）。失敗時的帳號是裝置送出的，只能當線索。</p>
+    {% else %}<p class="muted">沒有經 Proxy 代理的驗證失敗紀錄。</p>{% endif %}
+</div>
+{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='failures.js') }}"></script>{% endblock %}

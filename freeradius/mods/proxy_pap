@@ -1,0 +1,9 @@
+# radius-manager: Proxy 代理的內層是 PAP 或 GTC 時，由 inner-tunnel 的 Auth-Type PAP 直接呼叫（不是 xlat），
+# 帳號密碼以環境變數傳給程式。結束碼 0 = 外部接受、1 = 外部拒絕、2 = 沒有回應或錯誤；程式異常一律是拒絕。
+exec proxy_pap {
+	wait = yes
+	program = "/usr/local/sbin/radius-proxy-pap ${confdir}/radius-manager-proxy.json"
+	input_pairs = request
+	shell_escape = no
+	timeout = 10
+}
