@@ -2019,6 +2019,119 @@ def failures():
                            has_next=page * FAIL_PAGE_SIZE < total, stats_limit=FAIL_STATS_LIMIT)
 
 
+# ---- 版本更新 ----
+UPDATE_STATUS_FILE = os.path.join(STATE_DIR, 'update-status.json')
+EXPORT_FILE_DIR = os.path.join(STATE_DIR, 'exports')
+UPDATE_TIMEOUT = 120
+
+
+def project_info():
+    try:
+        with open(os.path.join(APP_ROOT, 'project.json'), encoding='utf-8') as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {'name': 'freeradius-woofweb', 'author': '', 'github': '', 'license': ''}
+
+
+def reauth_error(password):
+    """更新、回溯、匯出前再確認一次管理者密碼，失敗次數與登入共用鎖定。"""
+    address = request.remote_addr
+    if login_locked(address):
+        return f'失敗次數過多，請 {LOGIN_LOCK_SECONDS // 60} 分鐘後再試'
+    if check_password_hash(load_env().get('ADMIN_PASSWORD_HASH', ''), password or ''):
+        login_clear(address)
+        return ''
+    login_failed(address)
+    logging.warning(f'reauth failed: {address}')
+    return '管理者密碼錯誤'
+
+
+@app.route('/update')
+@require_login
+def update_page():
+    return render_template('update.html', project=project_info(), version=app_version())
+
+
+@app.route('/update/check', methods=['POST'])
+@require_login
+def update_check():
+    return jsonify(helper_call('update_check', timeout=UPDATE_TIMEOUT))
+
+
+@app.route('/update/key', methods=['POST'])
+@require_login
+def update_key():
+    result = helper_call('update_key')
+    if result.get('ok'):
+        log_change({'op': 'UPDATE_KEY'})
+    return jsonify(result)
+
+
+@app.route('/update/verify', methods=['POST'])
+@require_login
+def update_verify():
+    result = helper_call('update_verify', timeout=UPDATE_TIMEOUT)
+    if result.get('ok'):
+        log_change({'op': 'UPDATE_VERIFY', 'version': result.get('version'), 'differences': len(result.get('differences', [])),
+                    'links': len(result.get('links', []))})
+    return jsonify(result)
+
+
+@app.route('/update/backups', methods=['POST'])
+@require_login
+def update_backups():
+    return jsonify(helper_call('update_backups'))
+
+
+@app.route('/update/start', methods=['POST'])
+@require_login
+def update_start():
+    error = reauth_error(request.form.get('password'))
+    if error:
+        return jsonify(ok=False, error=error)
+    kind = request.form.get('kind', '')
+    params = {'kind': kind, 'version': request.form.get('version', ''), 'backup': request.form.get('backup', '')}
+    result = helper_call('update_start', timeout=UPDATE_TIMEOUT, **params)
+    log_change({'op': 'UPDATE_START' if kind == 'update' else 'UPDATE_ROLLBACK', 'from': app_version(),
+                'target': params['version'] or params['backup'], 'ok': bool(result.get('ok')), 'error': result.get('error', '')})
+    return jsonify(result)
+
+
+@app.route('/update/status')
+@require_login
+def update_status():
+    try:
+        with open(UPDATE_STATUS_FILE, encoding='utf-8') as f:
+            status = json.load(f)
+    except (OSError, ValueError):
+        status = {'state': 'none'}
+    return jsonify(ok=True, version=app_version(), **status)
+
+
+@app.route('/update/export', methods=['POST'])
+@require_login
+def update_export():
+    error = reauth_error(request.form.get('password'))
+    if error:
+        return jsonify(ok=False, error=error), 403
+    result = helper_call('config_export')
+    name = result.get('file', '')
+    if not result.get('ok') or not re.fullmatch(r'freeradius-woofweb-config-[A-Za-z0-9.-]+\.tar\.gz', name):
+        return jsonify(ok=False, error=result.get('error', '匯出失敗')), 500
+    path = os.path.join(EXPORT_FILE_DIR, name)
+    try:
+        with open(path, 'rb') as f:
+            data = f.read()
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    log_change({'op': 'CONFIG_EXPORT', 'files': result.get('count'), 'bytes': len(data)})
+    return Response(data, mimetype='application/gzip', headers={'Content-Disposition': f'attachment; filename={name}',
+                                                                'Cache-Control': 'no-store'})
+
+
 @app.route('/export')
 @require_login
 def export():

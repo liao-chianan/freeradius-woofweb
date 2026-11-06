@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block title %}版本更新 - radius 登入管理{% endblock %}
+{% block content %}
+<div class="toolbar"><div class="toolbar-title"><h1>版本更新</h1><span class="count">目前版本 {{ version }}</span></div></div>
+
+<section class="card section project-card">
+    <img src="{{ url_for('static', filename='author.png') }}" alt="{{ project.author }} 的頭像" width="80" height="80" class="author-avatar">
+    <div>
+        <h2>{{ project.name }}</h2>
+        <p>作者：<b>{{ project.author }}</b>{% if project.license %}　授權：{{ project.license }}{% endif %}</p>
+        {% if project.github %}<p>GitHub：<a href="{{ project.github }}" target="_blank" rel="noopener noreferrer">{{ project.github }}</a></p>{% endif %}
+    </div>
+</section>
+
+<section class="card section" id="version-card">
+    <h2>版本</h2>
+    <div class="stats">
+        <div class="stat"><b>{{ version }}</b><span>目前版本</span></div>
+        <div class="stat"><b id="latest-version">檢查中…</b><span>GitHub 最新版本</span></div>
+    </div>
+    <div class="notice" id="check-message" role="status" hidden></div>
+    <div id="newer" hidden>
+        <h3>新版本的說明</h3>
+        <div id="newer-notes"></div>
+        <p class="muted">更新前會自動備份目前的程式與全部設定，之後可以在下方回溯。安裝時 FreeRADIUS 與網頁服務會重新啟動，Wi-Fi 認證會中斷數秒到數十秒，建議在使用人數少的時候進行。</p>
+        <div class="actions"><button type="button" class="btn primary" id="update-button">更新</button></div>
+    </div>
+    <details id="current-notes-box" hidden><summary>目前版本的說明</summary><div id="current-notes" class="release-notes"></div></details>
+    <div id="key-box" hidden>
+        <h3>讀取 private 專案的金鑰</h3>
+        <p class="muted">GitHub 專案是 private 時，這台主機需要一把唯讀的部署金鑰（deploy key）。產生後把公鑰加到 GitHub 專案的 Settings → Deploy keys（<b>不要</b>勾選 Allow write access），再重新整理這一頁。金鑰只存在這台主機，不需要 GitHub 密碼或 token。</p>
+        <pre class="mono key-text" id="public-key" hidden></pre>
+        <div class="actions"><button type="button" class="btn" id="key-button">產生讀取金鑰</button></div>
+    </div>
+</section>
+
+<section class="card section" id="progress-card" hidden>
+    <h2 id="progress-title">更新進行中</h2>
+    <ul class="step-list" id="progress-steps"></ul>
+    <div class="notice" id="progress-message" role="status" hidden></div>
+    <details id="progress-log-box" hidden><summary>安裝紀錄</summary><pre class="mono install-log" id="progress-log"></pre></details>
+    <div class="actions" id="progress-done" hidden><a class="btn primary" href="{{ base }}/update">重新整理</a></div>
+</section>
+
+<section class="card section">
+    <h2>校驗程式碼</h2>
+    <p class="muted">下載 GitHub 上目前版本（v{{ version }}）的程式，逐一比對這台主機安裝的程式檔（SHA-256），確認沒有被修改。設定與資料不在比對範圍。</p>
+    <div class="actions"><button type="button" class="btn" id="verify-button">開始校驗</button></div>
+    <div class="notice" id="verify-message" role="status" hidden></div>
+    <div class="table-wrap" id="verify-table-wrap" hidden><table class="compact">
+        <thead><tr><th>檔案</th><th>狀態</th></tr></thead><tbody id="verify-rows"></tbody>
+    </table></div>
+</section>
+
+<section class="card section">
+    <h2>備份與回溯</h2>
+    <p class="muted">每次更新或回溯之前都會自動備份當時的程式與設定（保留最近 10 份）。回溯會重新安裝備份中的程式，設定與資料保持現狀；回溯前同樣會先備份。回到 0.8.0 以前的版本後就沒有這一頁，要再更新請在主機執行安裝指令。</p>
+    <div class="table-wrap"><table class="compact">
+        <thead><tr><th>備份時間</th><th>當時版本</th><th>原因</th><th>大小</th><th></th></tr></thead>
+        <tbody id="backup-rows"><tr><td colspan="5" class="muted">讀取中…</td></tr></tbody>
+    </table></div>
+</section>
+
+<section class="card section">
+    <h2>匯出設定</h2>
+    <p class="muted">把目前系統的設定打包成 .tar.gz 下載：管理介面設定與帳密雜湊、SSID 規則、黑白名單、裝置名單、AP 清單、RADIUS 用戶端與共用金鑰、Proxy、Google LDAP 設定、AD 設定檔與各種憑證（含私鑰）。不含登入紀錄與 AD 電腦帳號。<b>檔案內含機密，請妥善保存，用完刪除。</b></p>
+    <div class="actions"><button type="button" class="btn" id="export-button">匯出並下載</button></div>
+    <div class="notice" id="export-message" role="status" hidden></div>
+</section>
+
+<dialog id="password-dialog" aria-labelledby="password-title">
+    <h2 id="password-title">確認管理者密碼</h2>
+    <p id="password-lead"></p>
+    <div class="notice error" id="password-error" role="alert" hidden></div>
+    <form id="password-form" class="stack">
+        <label>管理者密碼<input type="password" name="password" autocomplete="current-password" required></label>
+        <div class="dialog-actions">
+            <button type="button" class="btn" id="password-cancel">取消</button>
+            <button type="submit" class="btn primary" id="password-ok">確認</button>
+        </div>
+    </form>
+</dialog>
+{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='update.js') }}"></script>{% endblock %}

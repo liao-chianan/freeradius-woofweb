@@ -7,7 +7,7 @@ set -u
 [ "${1:-}" = "--yes" ] || { echo "This deletes all settings and data. To continue: sudo bash uninstall.sh --yes" >&2; exit 2; }
 systemctl disable --now radius-manager radius-manager-helper.path radius-manager-macs-restart.path \
   radius-manager-ad-status.timer radius-manager-ad-status.path radius-manager-google-dir.timer radius-manager-google-dir.path 2>/dev/null
-systemctl stop freeradius winbind 2>/dev/null
+systemctl stop radius-manager-update freeradius winbind 2>/dev/null
 rm -f /etc/systemd/system/radius-manager* /usr/local/sbin/radius-manager /usr/local/sbin/radius-ssid-policy /usr/local/sbin/radius-device-limit /usr/local/sbin/radius-group-policy /usr/local/sbin/radius-proxy-filter /usr/local/sbin/radius-proxy-pap
 systemctl daemon-reload
 export DEBIAN_FRONTEND=noninteractive

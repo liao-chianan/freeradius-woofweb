@@ -152,3 +152,11 @@ pre.cert-info { margin: 8px 0; padding: 10px; overflow-x: auto; background: var(
 .page-actions { display: flex; justify-content: flex-end; margin: 0 0 24px; }
 #ssid-confirm h3 { margin: 14px 0 6px; font-size: 15px; }
 #ssid-confirm ul { margin: 0 0 8px; padding-left: 20px; }
+.project-card { display: flex; gap: 18px; align-items: center; }
+.project-card h2 { margin: 0 0 6px; }
+.project-card p { margin: 2px 0; }
+.author-avatar { border-radius: 50%; flex: none; }
+.release-note h4 { margin: 12px 0 4px; }
+.release-notes { white-space: pre-wrap; background: var(--bg); border-radius: 8px; padding: 10px 12px; font-size: 14px; }
+.key-text, .install-log { white-space: pre-wrap; word-break: break-all; background: var(--bg); padding: 10px; border-radius: 8px; font-size: 13px; }
+.install-log { max-height: 320px; overflow: auto; }

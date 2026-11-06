@@ -73,7 +73,7 @@ fi
 export DEBIAN_FRONTEND=noninteractive
 echo "==> Installing packages"
 apt-get update -qq -o APT::Update::Error-Mode=any || die "apt cannot reach the package mirrors; check this host's DNS (/etc/resolv.conf) and internet access"
-apt-get install -y -qq --no-install-recommends ca-certificates openssl wget python3 python3-flask python3-werkzeug \
+apt-get install -y -qq --no-install-recommends ca-certificates openssl wget git openssh-client python3 python3-flask python3-werkzeug \
   freeradius freeradius-ldap freeradius-utils winbind samba-common-bin libnss-winbind ldap-utils krb5-config >/dev/null
 
 WORK=$(mktemp -d)
@@ -101,7 +101,8 @@ install -d -o root -g radmgr -m 750 /etc/radius-manager/tls
 install -d -o radmgr -g radmgr -m 750 /var/lib/radius-manager /var/log/radius-manager
 install -d -o radmgr -g radmgr -m 700 /var/lib/radius-manager/requests /var/lib/radius-manager/backups /var/lib/radius-manager/pending
 install -d -o root -g radmgr -m 750 /var/lib/radius-manager/results
-install -d -o root -g root -m 700 /var/lib/radius-manager-root
+install -d -o root -g root -m 700 /var/lib/radius-manager-root /var/lib/radius-manager-root/backups
+install -d -o radmgr -g radmgr -m 700 /var/lib/radius-manager/exports
 install -d -o freerad -g radmgr -m 2770 /var/log/freeradius/macauth
 
 echo "==> Installing version $APP_VERSION"
@@ -110,11 +111,17 @@ PREVIOUS=$(readlink "$BASE/current" 2>/dev/null || true)
 mkdir -p "$BASE/releases"
 rm -rf "$RELEASE.new"
 mkdir "$RELEASE.new"
-tar -C "$WORK" -cf - app bin freeradius systemd migrations VERSION LICENSE | tar -C "$RELEASE.new" --no-same-owner -xf -
+# install.sh, CHANGELOG.md and project.json are kept so the web updater can roll back to this release.
+PARTS=()
+for part in app bin freeradius systemd migrations VERSION LICENSE project.json CHANGELOG.md install.sh uninstall.sh; do
+  [ -e "$WORK/$part" ] && PARTS+=("$part")
+done
+tar -C "$WORK" -cf - "${PARTS[@]}" | tar -C "$RELEASE.new" --no-same-owner -xf -
 chown -R root:root "$RELEASE.new"
 find "$RELEASE.new" -type d -exec chmod 755 {} +
 find "$RELEASE.new" -type f -exec chmod 644 {} +
 chmod 755 "$RELEASE.new"/bin/*
+[ -f "$RELEASE.new/install.sh" ] && chmod 755 "$RELEASE.new/install.sh" "$RELEASE.new/uninstall.sh" 2>/dev/null || true
 rm -rf "$RELEASE"
 mv "$RELEASE.new" "$RELEASE"
 ln -sfn "$RELEASE" "$BASE/current.new"

@@ -7,6 +7,8 @@ again. External commands never go through a shell and secrets never go on a comm
 
   radius-manager-helper process   handle queued requests
   radius-manager-helper render    install FreeRADIUS templates (install and upgrade)
+  radius-manager-helper update-run update <version> | rollback <backup id>
+                                  (started in the background by the update_start action)
 """
 import datetime
 import hashlib
@@ -51,6 +53,25 @@ PROXY_JSON = f'{RADDB}/radius-manager-proxy.json'
 PROXY_REALM = 'radmgr_proxy'
 KRB5_CONF = '/etc/krb5.conf'
 MAX_REQUEST = 1024 * 1024
+# ---- version update ----
+ROOT_DIR = '/var/lib/radius-manager-root'
+UPDATE_BACKUPS = f'{ROOT_DIR}/backups'
+UPDATE_WORK = f'{ROOT_DIR}/update-work'
+UPDATE_KEY = f'{ROOT_DIR}/github_deploy_ed25519'
+UPDATE_KNOWN_HOSTS = f'{ROOT_DIR}/github_known_hosts'
+# For a mirror or for testing: a git URL (or local path) in this root-only file replaces GitHub.
+UPDATE_SOURCE_OVERRIDE = f'{ROOT_DIR}/update-source'
+UPDATE_STATUS = f'{STATE_DIR}/update-status.json'
+EXPORT_DIR = f'{STATE_DIR}/exports'
+UPDATE_UNIT = 'radius-manager-update'
+KEEP_BACKUPS = 10
+# GitHub's published SSH host key (https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints)
+GITHUB_HOST_KEY = 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl'
+# What install.sh copies into a release; also what verification compares.
+INSTALL_PARTS = ('app', 'bin', 'freeradius', 'systemd', 'migrations', 'VERSION', 'LICENSE', 'project.json', 'CHANGELOG.md',
+                 'install.sh', 'uninstall.sh')
+VERSION_RE = re.compile(r'[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}')
+BACKUP_ID_RE = re.compile(r'[0-9]{8}-[0-9]{6}-[0-9A-Za-z._-]{1,32}')
 RESULT_MAX_AGE = 3600
 ENABLED_MODS = ('adauth_log', 'device_limit', 'failauth_log', 'googleauth_log', 'group_policy', 'ldap_google', 'macauth_log', 'proxy_filter',
                 'proxy_pap', 'proxyauth_log', 'ssid_policy')
@@ -860,12 +881,379 @@ def action_proxy_disable(params):
     return {'ok': True, 'message': '外部 RADIUS 已停用，共用金鑰已刪除；Proxy SSID 的登入會全部被拒絕'}
 
 
+# ---------------------------------------------------------------- version update
+def version_key(version):
+    return tuple(int(part) for part in version.split('.'))
+
+
+def installed_version():
+    return (read_bytes(os.path.join(APP_ROOT, 'VERSION')) or b'').decode().strip()
+
+
+def project_info():
+    try:
+        with open(os.path.join(APP_ROOT, 'project.json'), encoding='utf-8') as f:
+            info = json.load(f)
+        if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', info['repo']):
+            raise ValueError('bad repo')
+        return info
+    except (OSError, ValueError, KeyError) as e:
+        raise Refused(f'找不到專案資訊（project.json）：{e}')
+
+
+def git_env(ssh):
+    env = {'GIT_TERMINAL_PROMPT': '0', 'GIT_CONFIG_NOSYSTEM': '1', 'HOME': ROOT_DIR, 'GIT_ASKPASS': '/bin/false'}
+    if ssh:
+        if not os.path.exists(UPDATE_KNOWN_HOSTS):
+            write_file(UPDATE_KNOWN_HOSTS, (GITHUB_HOST_KEY + '\n').encode(), 0o600, 'root', 'root')
+        env['GIT_SSH_COMMAND'] = (f'ssh -i {UPDATE_KEY} -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes '
+                                  f'-o UserKnownHostsFile={UPDATE_KNOWN_HOSTS} -o ConnectTimeout=15')
+    return env
+
+
+def update_sources():
+    """(url, env, label)。公開的 repo 走 HTTPS；private 要用這台主機的讀取金鑰（deploy key）走 SSH。"""
+    override = (read_bytes(UPDATE_SOURCE_OVERRIDE) or b'').decode().strip()
+    if override:
+        return [(override, git_env(False), 'override')]
+    repo = project_info()['repo']
+    sources = [(f'https://github.com/{repo}.git', git_env(False), 'https')]
+    if os.path.exists(UPDATE_KEY):
+        sources.append((f'git@github.com:{repo}.git', git_env(True), 'ssh'))
+    return sources
+
+
+def remote_versions():
+    """回傳 (url, env, label, 版本清單由新到舊)。只認 vX.Y.Z 標籤。"""
+    errors = []
+    for url, env, label in update_sources():
+        result = run(['git', 'ls-remote', '--tags', '--refs', url], timeout=30, env=env)
+        if result.returncode == 0:
+            versions = {m.group(1) for m in re.finditer(r'refs/tags/v([0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4})$', result.stdout, re.M)}
+            return url, env, label, sorted(versions, key=version_key, reverse=True)
+        errors.append(f'{label}: {output_tail(result, 200)}')
+    hint = '' if os.path.exists(UPDATE_KEY) else '如果 GitHub 專案是 private，請按「產生讀取金鑰」並把公鑰加到專案的 Deploy keys。'
+    raise Refused(f'無法連到 GitHub 取得版本。{hint}（{" / ".join(errors)}）')
+
+
+def fetch_version(url, env, version, dest):
+    """淺層 clone 指定版本的標籤到 dest，並確認內容是這個版本。"""
+    if os.path.exists(dest):
+        shutil.rmtree(dest)
+    result = run(['git', '-c', 'advice.detachedHead=false', 'clone', '-q', '--depth', '1', '--branch', f'v{version}', url, dest],
+                 timeout=180, env=env)
+    if result.returncode != 0:
+        raise Refused(f'下載 v{version} 失敗：{output_tail(result)}')
+    shutil.rmtree(os.path.join(dest, '.git'), ignore_errors=True)
+    got = (read_bytes(os.path.join(dest, 'VERSION')) or b'').decode().strip()
+    if got != version or not os.path.exists(os.path.join(dest, 'app/radius_manager.py')) or not os.path.exists(os.path.join(dest, 'install.sh')):
+        raise Refused(f'v{version} 的內容不完整或版本號不符（VERSION={got!r}）')
+    return dest
+
+
+def changelog_sections(text):
+    """CHANGELOG.md 的「## X.Y.Z ...」段落，回傳 {版本: (標題, 內容)}。"""
+    sections, current = {}, None
+    for line in text.splitlines():
+        match = re.match(r'^##\s+v?([0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4})\b(.*)$', line)
+        if match:
+            current = match.group(1)
+            sections[current] = [line[2:].strip(), []]
+        elif current and not line.startswith('# '):
+            sections[current][1].append(line)
+    return {v: (title, '\n'.join(body).strip()) for v, (title, body) in sections.items()}
+
+
+def deploy_public_key():
+    return (read_bytes(UPDATE_KEY + '.pub') or b'').decode().strip()
+
+
+def action_update_check(params):
+    current = installed_version()
+    info = project_info()
+    url, env, label, versions = remote_versions()
+    latest = versions[0] if versions else ''
+    newer = [v for v in versions if VERSION_RE.fullmatch(current or '') and version_key(v) > version_key(current)]
+    notes = {}
+    if latest:
+        work = tempfile.mkdtemp(dir='/run', prefix='.radmgr-notes-')
+        try:
+            fetch_version(url, env, latest, os.path.join(work, 'src'))
+            notes = changelog_sections((read_bytes(os.path.join(work, 'src', 'CHANGELOG.md')) or b'').decode('utf-8', 'replace'))
+        except Refused as e:
+            notes = {latest: ('', f'（無法讀取版本說明：{e}）')}
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+    def note(v):
+        title, body = notes.get(v, (f'{v}', ''))
+        return {'version': v, 'title': title or v, 'notes': body or '（這個版本沒有版本說明）'}
+    return {'ok': True, 'current': current, 'latest': latest, 'versions': versions[:30], 'via': label,
+            'newer': [note(v) for v in newer], 'current_notes': note(current) if current in notes else None,
+            'repo': info['repo'], 'public_key': deploy_public_key(), 'running': update_running()}
+
+
+def action_update_key(params):
+    if not os.path.exists(UPDATE_KEY):
+        result = run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-C', f'freeradius-woofweb update ({socket.gethostname()})',
+                      '-f', UPDATE_KEY], timeout=30)
+        if result.returncode != 0:
+            raise Refused(f'無法產生金鑰：{output_tail(result)}')
+    return {'ok': True, 'public_key': deploy_public_key()}
+
+
+def file_digests(root):
+    digests = {}
+    for part in INSTALL_PARTS:
+        base = os.path.join(root, part)
+        if os.path.isfile(base):
+            paths = [base]
+        elif os.path.isdir(base):
+            paths = [os.path.join(d, f) for d, dirs, files in os.walk(base) for f in files
+                     if '__pycache__' not in d.split(os.sep) and not f.endswith('.pyc')]
+        else:
+            continue
+        for path in paths:
+            with open(path, 'rb') as f:
+                digests[os.path.relpath(path, root)] = hashlib.sha256(f.read()).hexdigest()
+    return digests
+
+
+def action_update_verify(params):
+    current = installed_version()
+    url, env, label, versions = remote_versions()
+    if current not in versions:
+        raise Refused(f'GitHub 上沒有 v{current} 這個版本，無法校驗')
+    local_root = os.path.realpath(APP_ROOT)
+    work = tempfile.mkdtemp(dir='/run', prefix='.radmgr-verify-')
+    try:
+        remote = file_digests(fetch_version(url, env, current, os.path.join(work, 'src')))
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    local = file_digests(local_root)
+    rows = []
+    for path in sorted(set(remote) | set(local)):
+        if path not in local:
+            state = 'missing'
+        elif path not in remote:
+            state = 'extra'
+        else:
+            state = 'same' if local[path] == remote[path] else 'modified'
+        if state != 'same':
+            rows.append({'path': path, 'state': state})
+    # The commands FreeRADIUS runs must point into this release.
+    links = []
+    for name in ('radius-manager', 'radius-ssid-policy', 'radius-device-limit', 'radius-group-policy', 'radius-proxy-filter', 'radius-proxy-pap'):
+        target = os.path.realpath(f'/usr/local/sbin/{name}')
+        if target != os.path.join(local_root, 'bin', name):
+            links.append({'path': f'/usr/local/sbin/{name}', 'state': f'指向 {target}'})
+    return {'ok': True, 'version': current, 'via': label, 'compared': len(set(remote) | set(local)),
+            'same': sum(1 for p in remote if local.get(p) == remote[p]), 'differences': rows[:300], 'links': links,
+            'release': local_root}
+
+
+def update_running():
+    return run(['systemctl', 'is-active', '--quiet', UPDATE_UNIT]).returncode == 0
+
+
+def write_status(status):
+    write_file(UPDATE_STATUS, json.dumps({**status, 'updated': time.strftime('%Y-%m-%d %H:%M:%S')}, ensure_ascii=False).encode(),
+               0o640, 'root', SERVICE_USER)
+
+
+def list_backups():
+    items = []
+    if os.path.isdir(UPDATE_BACKUPS):
+        for name in sorted(os.listdir(UPDATE_BACKUPS), reverse=True):
+            path = os.path.join(UPDATE_BACKUPS, name)
+            if not BACKUP_ID_RE.fullmatch(name) or not os.path.exists(os.path.join(path, 'code.tar.gz')):
+                continue
+            try:
+                with open(os.path.join(path, 'info.json'), encoding='utf-8') as f:
+                    info = json.load(f)
+            except (OSError, ValueError):
+                info = {}
+            items.append({'id': name, 'time': info.get('time', ''), 'version': info.get('version', '?'), 'reason': info.get('reason', ''),
+                          'size': sum(os.path.getsize(os.path.join(path, f)) for f in os.listdir(path))})
+    return items
+
+
+def action_update_backups(params):
+    return {'ok': True, 'backups': list_backups(), 'running': update_running()}
+
+
+def action_update_start(params):
+    if update_running():
+        raise Refused('已有更新或回溯正在進行')
+    kind = params.get('kind')
+    if kind == 'update':
+        version = params.get('version', '')
+        if not isinstance(version, str) or not VERSION_RE.fullmatch(version):
+            raise Refused('版本格式錯誤')
+        current = installed_version()
+        versions = remote_versions()[3]
+        if version not in versions:
+            raise Refused(f'GitHub 上沒有 v{version}')
+        if VERSION_RE.fullmatch(current) and version_key(version) <= version_key(current):
+            raise Refused('只能更新到比目前新的版本；要回到舊版請用下方的回溯')
+        arg = version
+    elif kind == 'rollback':
+        arg = params.get('backup', '')
+        if not isinstance(arg, str) or not BACKUP_ID_RE.fullmatch(arg) or not os.path.exists(os.path.join(UPDATE_BACKUPS, arg, 'code.tar.gz')):
+            raise Refused('找不到這個備份')
+    else:
+        raise Refused('不支援的操作')
+    write_status({'state': 'running', 'kind': kind, 'target': arg, 'from': installed_version(), 'steps': [], 'log': ''})
+    helper = os.path.realpath(os.path.join(APP_ROOT, 'bin', 'radius-manager-helper'))
+    result = run(['systemd-run', f'--unit={UPDATE_UNIT}', '--collect', '--quiet', '--description=freeradius-woofweb update',
+                  helper, 'update-run', kind, arg], timeout=30)
+    if result.returncode != 0:
+        write_status({'state': 'failed', 'kind': kind, 'target': arg, 'steps': [], 'log': output_tail(result)})
+        raise Refused(f'無法啟動：{output_tail(result)}')
+    return {'ok': True}
+
+
+def add_to_tar(tar, path, arcname):
+    if os.path.lexists(path):
+        tar.add(path, arcname=arcname, recursive=True)
+        return [arcname]
+    return []
+
+
+CONFIG_FILES = (
+    ('/etc/radius-manager', 'etc/radius-manager'),
+    (f'{STATE_DIR}/settings.json', 'var/lib/radius-manager/settings.json'),
+    (f'{STATE_DIR}/ap_list.json', 'var/lib/radius-manager/ap_list.json'),
+    (f'{STATE_DIR}/metadata.json', 'var/lib/radius-manager/metadata.json'),
+    (f'{STATE_DIR}/proxy.json', 'var/lib/radius-manager/proxy.json'),
+    (ROOT_STATE, 'var/lib/radius-manager-root/state.json'),
+    (f'{RADDB}/authorized_macs', 'etc/freeradius/3.0/authorized_macs'),
+    (CLIENTS, 'etc/freeradius/3.0/clients.conf'),
+    (PROXY_CONF, 'etc/freeradius/3.0/proxy.conf'),
+    (PROXY_JSON, 'etc/freeradius/3.0/radius-manager-proxy.json'),
+    (LDAP_CONF, 'etc/freeradius/3.0/ldap-google.conf'),
+    (LDAP_CERT, 'etc/freeradius/3.0/certs/ldap-client.crt'),
+    (LDAP_KEY, 'etc/freeradius/3.0/certs/ldap-client.key'),
+    (EAP_CERT_DIR, 'etc/freeradius/3.0/certs/radius-manager'),
+    (f'{RADDB}/mods-available/mschap', 'etc/freeradius/3.0/mods-available/mschap'),
+    (SMB_CONF, 'etc/samba/smb.conf'),
+    (KRB5_CONF, 'etc/krb5.conf'),
+)
+MACAUTH_DIR = '/var/log/freeradius/macauth'
+MACAUTH_SETTINGS = ('ssid-rules.json', 'device-limit.json', 'group-policy.json', 'blacklist.json', 'proxy-filter.json')
+
+
+def build_config_archive(dest):
+    """所有設定（含密碼雜湊、RADIUS 金鑰、憑證私鑰）。不含登入紀錄、快取、AD 機器帳號的 secrets.tdb。"""
+    import tarfile
+    included = []
+    with tarfile.open(dest, 'w:gz') as tar:
+        for path, arcname in CONFIG_FILES:
+            included += add_to_tar(tar, path, arcname)
+        for name in MACAUTH_SETTINGS:
+            included += add_to_tar(tar, os.path.join(MACAUTH_DIR, name), f'var/log/freeradius/macauth/{name}')
+        readme = (f'freeradius-woofweb settings export\nversion: {installed_version()}\nhost: {socket.gethostname()}\n'
+                  f'time: {time.strftime("%Y-%m-%d %H:%M:%S")}\n\n'
+                  'This archive contains secrets: the admin password hash, the web session key, RADIUS shared secrets,\n'
+                  'Google LDAP credentials and private keys. Keep it offline and delete copies you do not need.\n\n'
+                  'Not included: login history (logins.db), caches, and the AD machine account (re-join AD after restoring).\n'
+                  'Restore on a fresh install of the same version: stop radius-manager and freeradius, extract with\n'
+                  '"tar -xzpf <file> -C /", run "radius-manager-helper render", then start both services.\n\nFiles:\n'
+                  + ''.join(f'  /{name}\n' for name in included)).encode()
+        import io
+        member = tarfile.TarInfo('README.txt')
+        member.size, member.mtime, member.mode = len(readme), int(time.time()), 0o600
+        tar.addfile(member, io.BytesIO(readme))
+    os.chmod(dest, 0o600)
+    return included
+
+
+def action_config_export(params):
+    os.makedirs(EXPORT_DIR, exist_ok=True)
+    shutil.chown(EXPORT_DIR, SERVICE_USER, SERVICE_USER)
+    os.chmod(EXPORT_DIR, 0o700)
+    now = time.time()
+    for old in os.listdir(EXPORT_DIR):
+        if now - os.lstat(os.path.join(EXPORT_DIR, old)).st_mtime > 600:
+            os.unlink(os.path.join(EXPORT_DIR, old))
+    name = f"freeradius-woofweb-config-{re.sub(r'[^A-Za-z0-9-]', '', socket.gethostname())[:32]}-{installed_version()}-{time.strftime('%Y%m%d-%H%M%S')}.tar.gz"
+    dest = os.path.join(EXPORT_DIR, name)
+    included = build_config_archive(dest)
+    shutil.chown(dest, SERVICE_USER, SERVICE_USER)
+    return {'ok': True, 'file': name, 'count': len(included)}
+
+
+def update_run(kind, arg):
+    """在背景執行（systemd-run）。網頁服務會在安裝時重啟，進度寫在 update-status.json。"""
+    status = {'state': 'running', 'kind': kind, 'target': arg, 'from': installed_version(), 'steps': [], 'log': ''}
+
+    def step(name, ok=True, detail=''):
+        status['steps'].append({'name': name, 'ok': ok, 'detail': str(detail)[:600]})
+        write_status(status)
+    os.makedirs(UPDATE_WORK, mode=0o700, exist_ok=True)
+    work = tempfile.mkdtemp(dir=UPDATE_WORK)
+    src = os.path.join(work, 'src')
+    try:
+        if kind == 'update':
+            url, env, label, versions = remote_versions()
+            if arg not in versions:
+                raise Refused(f'GitHub 上沒有 v{arg}')
+            fetch_version(url, env, arg, src)
+            step(f'下載 v{arg}', detail=f'來源 {label}')
+            target = arg
+        else:
+            backup = os.path.join(UPDATE_BACKUPS, arg)
+            os.makedirs(src)
+            result = run(['tar', '-xzf', os.path.join(backup, 'code.tar.gz'), '-C', src], timeout=120)
+            if result.returncode != 0:
+                raise Refused(f'備份檔無法解開：{output_tail(result)}')
+            if not os.path.exists(os.path.join(src, 'install.sh')):
+                # Releases before 0.8.0 did not keep install.sh; this version's installer handles them.
+                shutil.copy2(os.path.join(os.path.realpath(APP_ROOT), 'install.sh'), os.path.join(src, 'install.sh'))
+            target = (read_bytes(os.path.join(src, 'VERSION')) or b'').decode().strip()
+            step(f'讀取備份 {arg}', detail=f'版本 {target}')
+        # Back up the running code and every setting before touching anything.
+        current = installed_version()
+        backup_id = f"{time.strftime('%Y%m%d-%H%M%S')}-{current or 'unknown'}"
+        backup_dir = os.path.join(UPDATE_BACKUPS, backup_id)
+        os.makedirs(backup_dir, mode=0o700)
+        result = run(['tar', '-czf', os.path.join(backup_dir, 'code.tar.gz'), '--exclude=__pycache__', '-C', os.path.realpath(APP_ROOT), '.'], timeout=300)
+        if result.returncode != 0:
+            raise Refused(f'備份程式失敗，未更新：{output_tail(result)}')
+        build_config_archive(os.path.join(backup_dir, 'config.tar.gz'))
+        write_file(os.path.join(backup_dir, 'info.json'), json.dumps({
+            'time': time.strftime('%Y-%m-%d %H:%M:%S'), 'version': current,
+            'reason': f'更新到 {target} 之前' if kind == 'update' else f'回溯到 {target} 之前'}, ensure_ascii=False).encode(), 0o600, 'root', 'root')
+        step('備份目前的程式與設定', detail=f'備份 {backup_id}')
+        for old in list_backups()[KEEP_BACKUPS:]:
+            shutil.rmtree(os.path.join(UPDATE_BACKUPS, old['id']), ignore_errors=True)
+        result = run(['bash', os.path.join(src, 'install.sh'), '--source', src], timeout=1200)
+        status['log'] = ((result.stdout or '') + (result.stderr or ''))[-4000:]
+        if result.returncode != 0:
+            raise Refused('安裝失敗，安裝程式已切回原本的版本（詳見下方紀錄）')
+        step(f'安裝 {target}', detail='FreeRADIUS 與網頁服務已重新啟動')
+        status['state'] = 'done'
+        status['result_version'] = installed_version()
+        write_status(status)
+    except Refused as e:
+        step('失敗', ok=False, detail=e)
+        status['state'] = 'failed'
+        write_status(status)
+    except Exception as e:
+        step('失敗', ok=False, detail=f'{type(e).__name__}: {e}')
+        status['state'] = 'failed'
+        write_status(status)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 ACTIONS = {
     'radius_clients': action_radius_clients, 'timezone': action_timezone,
     'ad_join': action_ad_join, 'ad_test': action_ad_test, 'ad_disable': action_ad_disable,
     'google_configure': action_google_configure, 'google_test': action_google_test, 'google_disable': action_google_disable,
     'eap_cert': action_eap_cert, 'eap_cert_info': action_eap_cert_info, 'web_cert': action_web_cert,
     'proxy_configure': action_proxy_configure, 'proxy_test': action_proxy_test, 'proxy_disable': action_proxy_disable,
+    'update_check': action_update_check, 'update_key': action_update_key, 'update_verify': action_update_verify,
+    'update_backups': action_update_backups, 'update_start': action_update_start, 'config_export': action_config_export,
 }
 
 
@@ -992,5 +1380,7 @@ if __name__ == '__main__':
         process()
     elif command == 'render':
         render()
+    elif command == 'update-run' and len(sys.argv) == 4 and sys.argv[2] in ('update', 'rollback'):
+        update_run(sys.argv[2], sys.argv[3])
     else:
         sys.exit(__doc__)
