@@ -182,3 +182,4 @@ pre.cert-info { margin: 8px 0; padding: 10px; overflow-x: auto; background: var(
 .cert-table th, .cert-table td { padding: 6px 8px; }
 .cert-table .small-text { font-size: 12px; }
 .ldap-cert.expiring { border-left: 4px solid var(--err-text); }
+.short-input { max-width: 8em; }

@@ -1,6 +1,9 @@
 #!/usr/bin/python3 -I
-"""Proxy 代理的帳號過濾：radius-proxy-filter <macauth 目錄> <帳號的 hex>。由 inner-tunnel 在轉送外部 RADIUS 之前呼叫。
-輸出 allow|外層|內層（可以轉送，外層 PEAP 或 TTLS，內層 MSCHAPv2、PAP 或 GTC）、blacklist（符合黑名單關鍵字）、notlisted（白名單有內容但都不符合）或 off（沒有設定外部 RADIUS）。
+"""Proxy 代理的帳號過濾：radius-proxy-filter <macauth 目錄> <帳號的 hex> <裝置實際用的外層 PEAP|TTLS>。由 inner-tunnel 在轉送外部 RADIUS 之前呼叫。
+輸出 allow|外層|這個外層允許的內層（空白分隔，依偏好順序，可能是空的）|允許的組合說明、
+blacklist（符合黑名單關鍵字）、notlisted（白名單有內容但都不符合）或 off（沒有設定外部 RADIUS）。
+允許的組合是網頁設定的主要方式，加上選填的第二種方式（outer2/inner2）：裝置不支援主要方式時，
+EAP 協商（NAK）改用第二種也接受。
 關鍵字是「包含」比對、不分大小寫，比對裝置送出的完整帳號（含 @ 之後）。黑名單優先；白名單留白代表不限制。
 與其他檢查不同，這裡出錯一律不轉送：FreeRADIUS 只在輸出 allow 時轉送，影響範圍只有 Proxy SSID。"""
 import json
@@ -19,7 +22,16 @@ def method(config):
     return outer, inner
 
 
-def decide(directory, account):
+def methods(config):
+    """主要方式在前；第二種方式沒填、不合法或與主要相同時忽略（不影響主要方式）。"""
+    chosen = [method(config)]
+    second = (config.get('outer2'), config.get('inner2'))
+    if second in METHODS and second not in chosen:
+        chosen.append(second)
+    return chosen
+
+
+def decide(directory, account, outer=''):
     with open(os.path.join(directory, 'proxy-filter.json'), encoding='utf-8') as f:
         config = json.load(f)
     if config.get('enabled') is not True:
@@ -32,12 +44,17 @@ def decide(directory, account):
     whitelist = [str(word).lower() for word in config['whitelist'] if str(word)]
     if whitelist and not any(word in name for word in whitelist):
         return 'notlisted'
-    return 'allow|%s|%s' % method(config)
+    allowed = methods(config)
+    if outer not in ('PEAP', 'TTLS'):
+        outer = allowed[0][0]
+    inners = ' '.join(i for o, i in allowed if o == outer)
+    return f"allow|{outer}|{inners}|{' or '.join(f'{o}-{i}' for o, i in allowed)}"
 
 
 if __name__ == '__main__':
     try:
-        print(decide(sys.argv[1], bytes.fromhex(sys.argv[2] if len(sys.argv) > 2 else '').decode('utf-8', 'replace')))
+        print(decide(sys.argv[1], bytes.fromhex(sys.argv[2] if len(sys.argv) > 2 else '').decode('utf-8', 'replace'),
+                     sys.argv[3] if len(sys.argv) > 3 else ''))
     except FileNotFoundError:
         print('off')
     except Exception as e:

@@ -11,7 +11,7 @@
 <section class="card section">
     <h2>外部 RADIUS</h2>
     {% include "_steps_result.html" %}
-    {% if info %}<p>目前轉送到 <b>{{ info.server }}:{{ info.port }}</b>（{{ info.updated }} 設定），驗證方式 <b>{{ config.outer }} + {{ config.inner }}</b>。{% if source_ip %}外部 RADIUS 會看到本機以 <b class="mono">{{ source_ip }}</b> 連線，請把這個 IP 與相同的共用金鑰加入外部的 RADIUS 用戶端。{% endif %}</p>{% endif %}
+    {% if info %}<p>目前轉送到 <b>{{ info.server }}:{{ info.port }}</b>（{{ info.updated }} 設定），驗證方式 <b>{{ config.outer }} + {{ config.inner }}</b>{% if config.outer2 %}，第二種 <b>{{ config.outer2 }} + {{ config.inner2 }}</b>{% endif %}。{% if source_ip %}外部 RADIUS 會看到本機以 <b class="mono">{{ source_ip }}</b> 連線，請把這個 IP 與相同的共用金鑰加入外部的 RADIUS 用戶端。{% endif %}</p>{% endif %}
     <form method="POST" action="{{ base }}/proxy/server" class="stack" autocomplete="off">
         <label>外部 RADIUS 位址
             <input name="server" value="{{ values.server or (info.server if info else '') }}" required maxlength="253" spellcheck="false" placeholder="IP 或主機名稱">
@@ -61,7 +61,23 @@
         {% if default_proxy %}<li>沒有吻合任何關鍵字的 SSID：{% if default_vlan %}VLAN {{ default_vlan }}{% else %}不發 VLAN{% endif %}</li>{% endif %}
     </ul>
     {% else %}<p class="muted">目前沒有 SSID 規則使用 Proxy 代理。</p>{% endif %}
-    <p class="muted"><a href="{{ base }}/ssid">到 SSID 驗證與 VLAN 修改規則</a>。裝置要設定 {{ config.outer }}、內層 {{ config.inner }}，伺服器憑證是本機的憑證（不是外部的）。</p>
+    <p class="muted"><a href="{{ base }}/ssid">到 SSID 驗證與 VLAN 修改規則</a>。裝置要設定 {{ config.outer }}、內層 {{ config.inner }}{% if config.outer2 %}（或第二種方式 {{ config.outer2 }}、內層 {{ config.inner2 }}）{% endif %}，伺服器憑證是本機的憑證（不是外部的）。</p>
+</section>
+
+<section class="card section" id="proxy-method2">
+    <h2>第二種驗證方式</h2>
+    <form method="POST" action="{{ base }}/proxy/method2" class="stack">
+        <p class="muted">裝置不支援主要方式（{{ config.outer }} + {{ config.inner }}）時，會在連線過程中要求改用別的方式；設定第二種方式後，裝置改要這種也接受。
+            Wi-Fi 一開始仍先提議主要方式的外層，同一次連線內協商，不是失敗後再重試。例如主要方式 PEAP + GTC 給 Windows、Android，
+            第二種方式 TTLS + PAP 給 iPad。外部 RADIUS 要能驗兩種方式送出的密碼（PAP 與 GTC 送給外部都是 PAP；MSCHAPv2 需要外部支援 MS-CHAPv2）。
+            立即生效，不需重啟 FreeRADIUS。</p>
+        <label>第二種方式
+            <select name="method2">
+                <option value="">不使用</option>
+                {% for o, i in methods %}{% if (o, i) != (config.outer, config.inner) %}<option value="{{ o }}-{{ i }}" {{ 'selected' if (config.outer2, config.inner2) == (o, i) }}>{{ o }} + {{ i }}</option>{% endif %}{% endfor %}
+            </select></label>
+        <div class="actions"><button type="submit" class="btn primary">儲存第二種驗證方式</button></div>
+    </form>
 </section>
 
 <section class="card section">
@@ -80,14 +96,32 @@
     </form>
 </section>
 
+<section class="card section" id="proxy-device-limit">
+    <h2>裝置數上限</h2>
+    <form method="POST" action="{{ base }}/proxy/device-limit" class="stack">
+        <p class="muted">每個外部帳號在一個週期內可登入的裝置數（以 MAC 計算），超過就拒絕，失敗原因是「超過裝置數上限」。
+            外部 RADIUS 驗證通過後才計數，密碼錯誤或被黑白名單擋下的不算。與 AD、Google 帳號的上限分開計算；
+            重置週期與「全部重置」沿用<a href="{{ base }}/settings">系統設定</a>（目前{% if window_hours == 24 %}每天 00:00{% else %}每 {{ window_hours }} 小時{% endif %}，下次重置 {{ next_reset }}）。
+            同一週期內用過的裝置不受影響；手機隨機 MAC 換了會算新裝置。立即生效，不需重啟 FreeRADIUS。</p>
+        <label>每個帳號可用的裝置數
+            <input name="proxy_limit" inputmode="numeric" value="{{ proxy_limit }}" required class="short-input">
+            <small class="muted">預設 1，0 表示不限制，最多 {{ max_device_limit }}。</small></label>
+        <div class="actions"><button type="submit" class="btn primary">儲存裝置數上限</button></div>
+    </form>
+</section>
+
 <div class="table-wrap card section">
     <h2>登入成功紀錄</h2>
     {% if accounts %}
     <table class="compact">
-        <thead><tr><th>外部帳號</th><th>裝置 MAC</th><th>最近登入</th><th>登入次數</th><th>依目前黑白名單</th></tr></thead>
+        <thead><tr><th>外部帳號</th><th>裝置 MAC</th><th>週期裝置</th><th>最近登入</th><th>登入次數</th><th>依目前黑白名單</th></tr></thead>
         <tbody>{% for u in accounts %}<tr>
             <td class="strong">{{ u.account }}</td>
-            <td class="mono">{% for mac in u.macs %}<div>{{ mac }}</div>{% else %}<span class="muted">-</span>{% endfor %}</td>
+            <td class="mono">{% for mac in u.macs %}<div>{{ mac }}</div>{% else %}<span class="muted">-</span>{% endfor %}{% for d in u.denied %}<div class="status-off" title="本週期被拒絕 {{ d.count }} 次，最後一次 {{ d.last }}">{{ d.mac }}<br>被拒絕</div>{% endfor %}</td>
+            <td class="nowrap">{% if proxy_limit == 0 %}{{ u.period }}（不限）{% else %}{{ u.period }} / {{ proxy_limit }}{% endif %}{% if u.period or u.denied %}
+                <form method="post" action="{{ base }}/device-limit/reset" class="device-reset" data-confirm="要重置 {{ u.account }} 的裝置數嗎？">
+                    <input type="hidden" name="account" value="{{ u.key }}"><button type="submit" class="btn small">重置</button>
+                </form>{% endif %}</td>
             <td class="nowrap">{{ u.last }}</td>
             <td>{{ u.logins }}</td>
             <td class="nowrap">{% if u.decision == 'allow' %}{{ u.decision_label }}{% else %}<span class="status-off">{{ u.decision_label }}</span>{% endif %}</td>

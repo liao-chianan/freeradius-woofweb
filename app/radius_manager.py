@@ -99,6 +99,8 @@ MAX_SSID_RULES = 50
 SSID_SEEN_DAYS = 30
 DEFAULT_DEVICE_LIMIT = 3
 MAX_DEVICE_LIMIT = 50
+DEFAULT_PROXY_DEVICE_LIMIT = 1
+PROXY_LIMIT_PREFIX = 'proxy:'
 # 週期從 00:00 起算，必須能整除 24，才不會跨日
 DEVICE_WINDOW_CHOICES = (1, 2, 3, 4, 6, 8, 12, 24)
 DEFAULT_DEVICE_WINDOW = 24
@@ -391,12 +393,14 @@ def load_device_limit():
         with open(DEVICE_LIMIT_FILE, encoding='utf-8') as f:
             config = json.load(f)
         window = int(config.get('window_hours', DEFAULT_DEVICE_WINDOW))
-        return {'limit': int(config['limit']), 'exempt': list(config.get('exempt', [])),
+        return {'limit': int(config['limit']), 'proxy_limit': int(config.get('proxy_limit', DEFAULT_PROXY_DEVICE_LIMIT)),
+                'exempt': list(config.get('exempt', [])),
                 'window_hours': window if window in DEVICE_WINDOW_CHOICES else DEFAULT_DEVICE_WINDOW,
                 'reset_all': int(config.get('reset_all', 0)),
                 'resets': {str(k): int(v) for k, v in dict(config.get('resets', {})).items()}}
     except (OSError, ValueError, KeyError, TypeError):
-        return {'limit': DEFAULT_DEVICE_LIMIT, 'exempt': [], 'window_hours': DEFAULT_DEVICE_WINDOW, 'reset_all': 0, 'resets': {}}
+        return {'limit': DEFAULT_DEVICE_LIMIT, 'proxy_limit': DEFAULT_PROXY_DEVICE_LIMIT, 'exempt': [], 'window_hours': DEFAULT_DEVICE_WINDOW,
+                'reset_all': 0, 'resets': {}}
 
 
 def save_radius_json(path, config):
@@ -893,15 +897,20 @@ def load_proxy_info():
 
 def load_proxy_filter():
     """回傳 (設定, 錯誤訊息)。FreeRADIUS 讀不到這個檔案時 Proxy SSID 會全部拒絕，所以要在頁面上警告。"""
-    config = {'enabled': False, 'whitelist': [], 'blacklist': [], 'outer': 'PEAP', 'inner': 'MSCHAPv2'}
+    config = {'enabled': False, 'whitelist': [], 'blacklist': [], 'outer': 'PEAP', 'inner': 'MSCHAPv2', 'outer2': '', 'inner2': ''}
     try:
         with open(PROXY_FILTER_FILE, encoding='utf-8') as f:
             data = json.load(f)
         method = (data.get('outer', 'PEAP'), data.get('inner', 'MSCHAPv2'))
         if method not in PROXY_METHODS:
             raise ValueError(f'bad method {method}')
+        # 第二種方式（選填）：裝置不支援主要方式時，EAP 協商改用它也接受
+        second = (data.get('outer2', ''), data.get('inner2', ''))
+        if second not in PROXY_METHODS or second == method:
+            second = ('', '')
         config = {'enabled': data.get('enabled') is True, 'whitelist': [str(w) for w in data['whitelist']],
-                  'blacklist': [str(w) for w in data['blacklist']], 'outer': method[0], 'inner': method[1]}
+                  'blacklist': [str(w) for w in data['blacklist']], 'outer': method[0], 'inner': method[1],
+                  'outer2': second[0], 'inner2': second[1]}
     except FileNotFoundError:
         pass
     except (OSError, ValueError, KeyError, TypeError) as e:
@@ -1511,10 +1520,13 @@ def proxy_page(res=None, values=None, status=200):
     finally:
         conn.close()
     rows = sorted(accounts.values(), key=lambda row: -row['last_ts'])
+    limit = load_device_limit()
+    counts, denied = device_limit_current(limit)
     for row in rows:
         decision = proxy_filter_decide({**config, 'enabled': True}, row['account'])
+        key = PROXY_LIMIT_PREFIX + row['account']
         row.update(last=datetime.fromtimestamp(row['last_ts']).strftime('%Y-%m-%d %H:%M:%S'), decision=decision,
-                   decision_label=PROXY_FILTER_LABELS[decision])
+                   decision_label=PROXY_FILTER_LABELS[decision], key=key, period=counts.get(key, 0), denied=denied.get(key, []))
     index = ap_index()
     failures = [{'time': datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S'), 'mac': mac, 'account': account, 'ssid': ssid,
                  'ap_name': ap_name_for(called, ip, nas_ip, index), 'reason': fail_reason_label(kind, reason), 'detail': reason}
@@ -1522,6 +1534,8 @@ def proxy_page(res=None, values=None, status=200):
     return render_template('proxy.html', info=info, source_ip=proxy_source_ip(info) if info else '', config=config, filter_error=filter_error,
                            ssid_rules=ssid_rules, default_proxy=rules['default']['auth'] == 'proxy', default_vlan=rules['default']['vlan'],
                            accounts=rows, failures=failures, res=res, values=values or {}, recent_limit=PROXY_RECENT_FAILURES,
+                           proxy_limit=limit['proxy_limit'], max_device_limit=MAX_DEVICE_LIMIT, window_hours=limit['window_hours'],
+                           next_reset=device_window(limit['window_hours'])[1].strftime('%m-%d %H:%M'),
                            methods=PROXY_METHODS, method_notes={f'{o}-{i}': note for (o, i), note in PROXY_METHOD_NOTES.items()},
                            current_note=PROXY_METHOD_NOTES[(config['outer'], config['inner'])]), status
 
@@ -1537,6 +1551,9 @@ def set_proxy_enabled(enabled, method=None):
         config, _ = load_proxy_filter()
         if method:
             config.update(outer=method[0], inner=method[1])
+            if (config['outer2'], config['inner2']) == tuple(method):
+                # 主要方式改成和第二種相同時，第二種就沒有意義
+                config.update(outer2='', inner2='')
         save_radius_json(PROXY_FILTER_FILE, {**config, 'enabled': enabled})
 
 
@@ -1620,6 +1637,56 @@ def proxy_filter_save():
     return redirect('/proxy')
 
 
+@app.route('/proxy/method2', methods=['POST'])
+@require_login
+def proxy_method2_save():
+    value = request.form.get('method2', '')
+    second = tuple(value.split('-', 1)) if value else ('', '')
+    with data_lock():
+        config, _ = load_proxy_filter()
+        if value and (second not in PROXY_METHODS or second == (config['outer'], config['inner'])):
+            flash('第二種驗證方式不正確，或與主要方式相同', 'error')
+            return redirect('/proxy')
+        before = '-'.join(x for x in (config['outer2'], config['inner2']) if x)
+        if before == value:
+            flash('第二種驗證方式沒有變更', 'success')
+            return redirect('/proxy')
+        try:
+            save_radius_json(PROXY_FILTER_FILE, {**config, 'outer2': second[0], 'inner2': second[1]})
+        except OSError as e:
+            logging.error(f'save proxy method2 failed: {e}')
+            flash('無法儲存第二種驗證方式，未變更', 'error')
+            return redirect('/proxy')
+    log_change({'op': 'PROXY_METHOD2', 'before': before, 'after': value})
+    flash(f'第二種驗證方式已{"設為 " + value.replace("-", " + ") if value else "取消"}，立即生效，不需重啟 FreeRADIUS', 'success')
+    return redirect('/proxy')
+
+
+@app.route('/proxy/device-limit', methods=['POST'])
+@require_login
+def proxy_device_limit_save():
+    value = request.form.get('proxy_limit', '').strip()
+    if not re.fullmatch(r'[0-9]{1,2}', value) or int(value) > MAX_DEVICE_LIMIT:
+        flash(f'裝置數上限必須是 0 到 {MAX_DEVICE_LIMIT} 的數字，0 表示不限制', 'error')
+        return redirect('/proxy')
+    with _device_limit_lock:
+        limit = load_device_limit()
+        before = limit['proxy_limit']
+        if before == int(value):
+            flash('裝置數上限沒有變更', 'success')
+            return redirect('/proxy')
+        try:
+            save_device_limit({**limit, 'proxy_limit': int(value)})
+        except OSError as e:
+            logging.error(f'save proxy device limit failed: {e}')
+            flash('無法儲存裝置數上限，未變更', 'error')
+            return redirect('/proxy')
+    log_change({'op': 'SETTINGS', 'proxy_device_limit': [before, int(value)]})
+    logging.info(f"SETTINGS - proxy_device_limit: {before} -> {value} | User: {session.get('user')}")
+    flash('Proxy 代理的裝置數上限已儲存，立即生效' + ('（不限制）' if value == '0' else ''), 'success')
+    return redirect('/proxy')
+
+
 @app.route('/ad/logins')
 @require_login
 def ad_logins():
@@ -1652,15 +1719,21 @@ def settings_limit_args(limit, **overrides):
 def device_limit_reset():
     """手動重置只寫入時間點，由檢查程式忽略這之前的裝置；資料庫由 FreeRADIUS 擁有，這裡不寫入。"""
     reset_all = request.form.get('scope') == 'all'
-    account = normalize_account(request.form.get('account', ''))
+    raw_account = request.form.get('account', '')
+    back_proxy = raw_account.startswith(PROXY_LIMIT_PREFIX)
+    if back_proxy:
+        # 外部帳號格式不固定（含 @ 或 \），與 proxy 登入紀錄相同的正規化
+        account = PROXY_LIMIT_PREFIX + re.sub(r'[\x00-\x1f\x7f]', '', raw_account[len(PROXY_LIMIT_PREFIX):]).strip().lower()[:128]
+    else:
+        account = normalize_account(raw_account)
     back_google = account.startswith(GOOGLE_LIMIT_PREFIX)
     status = request.form.get('status', '')
     query = request.form.get('q', '')[:64]
-    target = '/settings' if reset_all else '/google' if back_google else '/ad?' + urlencode({'status': status if status in ('all', 'enabled', 'disabled') else 'enabled', 'q': query})
+    target = '/settings' if reset_all else '/proxy' if back_proxy else '/google' if back_google else '/ad?' + urlencode({'status': status if status in ('all', 'enabled', 'disabled') else 'enabled', 'q': query})
     if reset_all and request.form.get('confirmed') != '1':
         flash('請勾選確認後再重置全部帳號', 'error')
         return redirect(target)
-    if not reset_all and not ACCOUNT_RE.fullmatch(account.removeprefix(GOOGLE_LIMIT_PREFIX)):
+    if not reset_all and not (back_proxy and len(account) > len(PROXY_LIMIT_PREFIX)) and not ACCOUNT_RE.fullmatch(account.removeprefix(GOOGLE_LIMIT_PREFIX)):
         flash('帳號格式錯誤', 'error')
         return redirect(target)
     # 加 1 秒：這一秒內已登入的裝置也算在重置之前

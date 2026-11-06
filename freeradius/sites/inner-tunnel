@@ -60,19 +60,22 @@ authorize {
 	#  radius-manager: Proxy 代理 SSID。本機完成外層 TLS（PEAP 或 TTLS），依網頁設定的內層方式把驗證交給外部 RADIUS：
 	#    MSCHAPv2：以一般 MS-CHAPv2 屬性轉送（radmgr_proxy realm；PEAP 靠 eap 模組的 proxy_tunneled_request_as_eap = no，TTLS 只接受非 EAP 的 MSCHAPv2）
 	#    PAP、GTC：通道內已拿到明文密碼，由 Auth-Type PAP 的 proxy_pap 以 PAP 送給外部
-	#  黑白名單比對內層帳號（實際送去外部驗證的帳號）。過濾程式輸出 allow|外層|內層 才繼續，出錯或沒有設定一律拒絕（只影響 Proxy SSID）。
+	#  黑白名單比對內層帳號（實際送去外部驗證的帳號）。過濾程式輸出 allow|外層|允許的內層|說明 才繼續，出錯或沒有設定一律拒絕（只影響 Proxy SSID）。
+	#  允許的方式是網頁設定的主要方式加上選填的第二種：外層由 default 先提議主要方式，裝置 NAK 改要另一種外層或內層時，只要是允許的組合就接受。
 	#  必須放在 suffix、Proxy-To-Realm := LOCAL 與 mschap 之前，否則會改用本機 AD 驗證。
 	if (&outer.session-state:Tmp-String-1 =~ /^proxy\|/) {
 		update outer.session-state {
 			&Tmp-String-5 := "%{User-Name}"
 		}
 		update request {
-			&Tmp-String-6 := "%{proxy_filter:/usr/local/sbin/radius-proxy-filter ${logdir}/macauth %{hex:&User-Name}}"
+			&Tmp-String-6 := "%{proxy_filter:/usr/local/sbin/radius-proxy-filter ${logdir}/macauth %{hex:&User-Name} %{outer.request:EAP-Type}}"
 		}
-		if (&Tmp-String-6 =~ /^allow\|(PEAP|TTLS)\|(MSCHAPv2|PAP|GTC)$/) {
+		#  allow|裝置用的外層|這個外層允許的內層（空白分隔，第一個是偏好）|允許的組合（錯誤訊息用）
+		if (&Tmp-String-6 =~ /^allow\|(PEAP|TTLS)\|([A-Za-z0-9 ]*)\|(.+)$/) {
 			update control {
-				&Tmp-String-8 := "%{1}"
-				&Tmp-String-9 := "%{2}"
+				&Tmp-String-7 := "%{1}"
+				&Tmp-String-8 := " %{2} "
+				&Tmp-String-9 := "%{3}"
 			}
 		}
 		else {
@@ -93,17 +96,18 @@ authorize {
 			}
 			reject
 		}
-		#  外層與內層都要和設定相同
-		if (&control:Tmp-String-8 != "%{outer.request:EAP-Type}") {
+		#  裝置用的外層沒有允許的內層（例如只允許 TTLS 的方式，裝置卻用 PEAP）
+		if (&control:Tmp-String-8 !~ /[A-Z]/) {
 			update request {
-				&Module-Failure-Message := "Proxy SSID requires %{control:Tmp-String-8}-%{control:Tmp-String-9}"
+				&Module-Failure-Message := "Proxy SSID requires %{control:Tmp-String-9}"
 			}
 			reject
 		}
-		if (&control:Tmp-String-9 == "PAP") {
-			if (!&User-Password || &EAP-Message) {
+		#  TTLS 的 PAP：通道內直接拿到明文密碼，由 Auth-Type PAP 的 proxy_pap 送給外部
+		if (&User-Password) {
+			if (&EAP-Message || (&control:Tmp-String-8 !~ / PAP /)) {
 				update request {
-					&Module-Failure-Message := "Proxy SSID requires %{control:Tmp-String-8}-%{control:Tmp-String-9}"
+					&Module-Failure-Message := "Proxy SSID requires %{control:Tmp-String-9}"
 				}
 				reject
 			}
@@ -112,58 +116,81 @@ authorize {
 			}
 			return
 		}
-		if (&User-Password) {
+		#  TTLS 的非 EAP MSCHAPv2：以一般 MS-CHAPv2 屬性轉送（TTLS 的 EAP 內層不會被轉換，所以 TTLS 只接受這種）
+		if (!&EAP-Message) {
+			if (&MS-CHAP-Challenge && &MS-CHAP2-Response && (&control:Tmp-String-7 == "TTLS") && (&control:Tmp-String-8 =~ / MSCHAPv2 /)) {
+				update control {
+					&Proxy-To-Realm := "radmgr_proxy"
+				}
+				return
+			}
 			update request {
-				&Module-Failure-Message := "Proxy SSID requires %{control:Tmp-String-8}-%{control:Tmp-String-9}"
+				&Module-Failure-Message := "Proxy SSID requires %{control:Tmp-String-9}"
 			}
 			reject
 		}
-		if (&control:Tmp-String-9 == "GTC") {
-			if (!&EAP-Message) {
+		#  EAP 內層：GTC（PEAP、TTLS），或 PEAP 的 MSCHAPv2（由 eap 模組轉成 MS-CHAP 屬性轉送）。
+		#  只在第一個內層封包（EAP-Identity）指定要提議的方式：裝置回 NAK 改要另一種時不可再指定，rlm_eap 才會接受。
+		if (&EAP-Message =~ /^0x02..[0-9a-f]{4}01/) {
+			if (&control:Tmp-String-7 == "TTLS") {
+				if (&control:Tmp-String-8 !~ / GTC /) {
+					update request {
+						&Module-Failure-Message := "Proxy SSID requires %{control:Tmp-String-9}"
+					}
+					reject
+				}
+				update control {
+					&EAP-Type := GTC
+				}
+			}
+			elsif (&control:Tmp-String-8 =~ /^ GTC /) {
+				update control {
+					&EAP-Type := GTC
+				}
+			}
+			else {
+				update control {
+					&EAP-Type := MSCHAPv2
+					&Proxy-To-Realm := "radmgr_proxy"
+				}
+			}
+		}
+		#  裝置回 NAK：第 6 個位元組是它要改用的方式（06 GTC、1a MSCHAPv2），不在允許清單就直接拒絕，不轉送
+		elsif (&EAP-Message =~ /^0x02..[0-9a-f]{4}03(..)/) {
+			if (!(("%{1}" == "06") && (&control:Tmp-String-8 =~ / GTC /)) && !(("%{1}" == "1a") && (&control:Tmp-String-7 == "PEAP") && (&control:Tmp-String-8 =~ / MSCHAPv2 /))) {
 				update request {
-					&Module-Failure-Message := "Proxy SSID requires %{control:Tmp-String-8}-%{control:Tmp-String-9}"
+					&Module-Failure-Message := "Proxy SSID requires %{control:Tmp-String-9}"
 				}
 				reject
 			}
-			update control {
-				&EAP-Type := GTC
-			}
-			eap
-			if (&EAP-Type && (&EAP-Type != Identity) && (&EAP-Type != GTC)) {
+		}
+		eap
+		if (&EAP-Type == GTC) {
+			if (&control:Tmp-String-8 !~ / GTC /) {
 				update request {
-					&Module-Failure-Message := "Proxy SSID requires %{control:Tmp-String-8}-%{control:Tmp-String-9}"
+					&Module-Failure-Message := "Proxy SSID requires %{control:Tmp-String-9}"
 				}
 				reject
 			}
 			return
 		}
-		#  MSCHAPv2。PEAP 內層是 EAP-MSCHAPv2，由 eap 模組轉成 MS-CHAP 屬性；TTLS 的 EAP 內層不會轉換，只接受非 EAP 的 MSCHAPv2
-		if (&EAP-Message) {
-			if (&control:Tmp-String-8 == "TTLS") {
-				update request {
-					&Module-Failure-Message := "Proxy SSID requires %{control:Tmp-String-8}-%{control:Tmp-String-9}"
-				}
-				reject
-			}
-			update control {
-				&EAP-Type := MSCHAPv2
-			}
-			eap
-			if (&EAP-Type && (&EAP-Type != Identity) && (&EAP-Type != MSCHAPv2)) {
-				update request {
-					&Module-Failure-Message := "Proxy SSID requires %{control:Tmp-String-8}-%{control:Tmp-String-9}"
-				}
-				reject
-			}
-		}
-		elsif (!&MS-CHAP-Challenge || !&MS-CHAP2-Response) {
+		if (&EAP-Type && (&EAP-Type != Identity) && (&EAP-Type != NAK) && (&EAP-Type != MSCHAPv2)) {
 			update request {
-				&Module-Failure-Message := "Proxy SSID requires %{control:Tmp-String-8}-%{control:Tmp-String-9}"
+				&Module-Failure-Message := "Proxy SSID requires %{control:Tmp-String-9}"
 			}
 			reject
 		}
-		update control {
-			&Proxy-To-Realm := "radmgr_proxy"
+		if ((&EAP-Type == MSCHAPv2) && ((&control:Tmp-String-7 != "PEAP") || (&control:Tmp-String-8 !~ / MSCHAPv2 /))) {
+			update request {
+				&Module-Failure-Message := "Proxy SSID requires %{control:Tmp-String-9}"
+			}
+			reject
+		}
+		#  PEAP 的 MSCHAPv2 回合標記轉送（第一個回合提議 MSCHAPv2 時已在上面標記）；NAK 與 GTC 回合不轉送
+		if (&EAP-Type == MSCHAPv2) {
+			update control {
+				&Proxy-To-Realm := "radmgr_proxy"
+			}
 		}
 		return
 	}

@@ -749,6 +749,14 @@ post-auth {
 	}
 	#  radius-manager: 記錄 Proxy 代理登入成功（帳號由 inner-tunnel 傳來）
 	if (&session-state:Tmp-String-5) {
+		#  radius-manager: Proxy 代理的裝置數上限（Proxy 代理頁設定，預設 1）。外部已驗證通過，這裡才計數；
+		#  放在外層，MS-CHAPv2 轉送與 PAP/GTC 都會經過。帳號格式不固定，用 hex 傳。程式異常時放行（同 AD 的裝置上限）。
+		if ("%{device_limit:/usr/local/sbin/radius-device-limit proxyhex:%{hex:&session-state:Tmp-String-5} %{Calling-Station-Id} ${logdir}/macauth}" == "deny") {
+			update request {
+				&Module-Failure-Message := "Daily device limit reached: %{Calling-Station-Id}"
+			}
+			reject
+		}
 		proxyauth_log {
 			fail = 1
 		}

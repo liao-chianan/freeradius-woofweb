@@ -1,5 +1,7 @@
 #!/usr/bin/python3 -I
 """裝置上限：radius-device-limit <帳號> <裝置 MAC> <macauth 目錄>。由 FreeRADIUS 在內層驗證成功後呼叫。
+Proxy 代理的帳號由外層 post-auth 以 proxyhex:<帳號 hex> 傳入（外部帳號格式不固定，可能含空白），
+以 proxy:<完整帳號小寫> 計算，上限用設定檔的 proxy_limit（預設 1），與 AD、Google 分開。
 超過上限時輸出 deny，其餘情況不輸出。任何錯誤都放行：這支程式壞掉不可讓全校無法登入 Wi-Fi。
 週期從 00:00 起算且能整除 24，不會跨日，所以資料仍以日為單位，週期內的裝置以 last_ts 判斷。
 另有 --migrate <macauth 目錄>：加上 last_ts 欄位並由今天的登入紀錄補值，只在部署時用一次。"""
@@ -12,6 +14,8 @@ import sys
 import time
 
 DEFAULT_LIMIT = 3
+DEFAULT_PROXY_LIMIT = 1
+PROXY_PREFIX = 'proxy:'
 DEFAULT_WINDOW = 24
 WINDOW_CHOICES = (1, 2, 3, 4, 6, 8, 12, 24)
 KEEP_DAYS = 30
@@ -27,6 +31,12 @@ def normalize_account(value):
     return value.lower()
 
 
+def proxy_account(value):
+    """與網頁匯入 proxy 登入紀錄的正規化相同：去控制字元、去頭尾空白、小寫、最多 128 字。"""
+    text = bytes.fromhex(value).decode('utf-8', 'replace')
+    return PROXY_PREFIX + re.sub(r'[\x00-\x1f\x7f]', '', text).strip().lower()[:128]
+
+
 def open_db(directory):
     os.umask(0o027)
     conn = sqlite3.connect(os.path.join(directory, 'device-limit.db'), timeout=3, isolation_level=None)
@@ -40,9 +50,9 @@ def load_config(directory):
         with open(os.path.join(directory, 'device-limit.json'), encoding='utf-8') as f:
             config = json.load(f)
     except FileNotFoundError:
-        return {'limit': DEFAULT_LIMIT, 'exempt': set(), 'window': DEFAULT_WINDOW, 'reset_all': 0, 'resets': {}}
+        return {'limit': DEFAULT_LIMIT, 'proxy_limit': DEFAULT_PROXY_LIMIT, 'exempt': set(), 'window': DEFAULT_WINDOW, 'reset_all': 0, 'resets': {}}
     window = int(config.get('window_hours', DEFAULT_WINDOW))
-    return {'limit': int(config['limit']),
+    return {'limit': int(config['limit']), 'proxy_limit': int(config.get('proxy_limit', DEFAULT_PROXY_LIMIT)),
             'exempt': {normalize_account(a) for a in config.get('exempt', [])},
             'window': window if window in WINDOW_CHOICES else DEFAULT_WINDOW,
             'reset_all': int(config.get('reset_all', 0)),
@@ -56,12 +66,13 @@ def period_start(now, window):
 
 def check(account, mac, directory):
     """回傳 True 表示放行。不限制與排除的帳號也要記錄，中途開啟上限時數字才正確。"""
-    account = normalize_account(account)
+    proxy = account.startswith('proxyhex:')
+    account = proxy_account(account[len('proxyhex:'):]) if proxy else normalize_account(account)
     mac = mac.strip().upper().replace(':', '-')
-    if not account or not MAC_RE.fullmatch(mac):
+    if not account or account == PROXY_PREFIX or not MAC_RE.fullmatch(mac):
         return True
     config = load_config(directory)
-    limit, exempt = config['limit'], config['exempt']
+    limit, exempt = (config['proxy_limit'], set()) if proxy else (config['limit'], config['exempt'])
     now = int(time.time())
     start = max(period_start(now, config['window']), config['reset_all'], int(config['resets'].get(account, 0)))
     day = time.strftime('%Y-%m-%d', time.localtime(now))
