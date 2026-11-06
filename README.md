@@ -1,8 +1,12 @@
-# freeradius-woofweb
+# freeradius-woofweb專案介紹
 
-在一台全新的 Debian 13 上，用一行指令裝好 FreeRADIUS 與網頁管理介面，管理學校或企業 Wi-Fi 的 802.1X 認證。
 
-> 主機上的服務、指令與目錄沿用內部名稱 `radius-manager`（例如 `radius-manager.service`、`/opt/radius-manager`、`sudo radius-manager setup-url`）。
+在Debian上配合開源專案freeradius的自製簡易管理web介面，用來管理校內的無線網路Wi-Fi 的 802.1X 認證
+後端驗證可搭配mac address白名單、google workspace帳號、samba AD帳號、以及外部proxy代理
+
+感謝freeradius原始開發團隊 https://github.com/FreeRADIUS/
+
+# 既有功能說明：
 
 - **放行裝置名單**：以 MAC 認證，可依裝置指定 VLAN
 - **AD 帳號**：PEAP-MSCHAPv2，透過 winbind 驗證
@@ -13,8 +17,8 @@
 - **SSID 規則**：依 SSID 關鍵字決定驗證方式與 VLAN
 - **登入紀錄、驗證失敗歷史、AP 管理、每個帳號的裝置數上限**
 
-## 安裝
-
+## 安裝方式
+在一台全新的 Debian 13 上，用一行指令裝好 FreeRADIUS 與網頁管理介面，管理學校或企業 Wi-Fi 的 802.1X 認證。
 在全新的 Debian 13，用有 sudo 權限的帳號執行（Debian 預設沒有 curl，所以用 wget）：
 
 ```bash
@@ -29,7 +33,7 @@ wget -qO- https://raw.githubusercontent.com/liao-chianan/freeradius-woofweb/main
 
 裝完會顯示一次性連結，用瀏覽器開啟後完成初始化。管理介面是 `https://<主機 IP>:<連接埠>/woofradius/`，其他路徑（包括 `/`）一律回 404，外部掃描看不到登入頁。一開始用自簽憑證，所以瀏覽器會出現警告。連接埠與路徑存在 `/etc/radius-manager/web.env`。
 
-連結遺失：`sudo radius-manager setup-url`
+連結遺失可用這個方式找回：`sudo radius-manager setup-url`
 
 ### 需要開放的連線
 
@@ -83,11 +87,6 @@ radius-manager version            # 目前版本
 - 登入失敗 5 次鎖定 5 分鐘，拒絕跨站 POST，管理介面走 HTTPS
 - `auth_badpass` 與 `auth_goodpass` 一律關閉，避免 PAP／GTC 的明文密碼寫進 log
 
-### 上線前請注意
-
-- **Google 驗證的密碼會以明文進入 TLS 通道。** 免設定的裝置通常是由使用者自己按信任憑證，假 AP 可能藉此取得密碼。請告知使用者憑證上的正確名稱，學校管理的裝置請用 MDM 或 GPO 預先指定憑證，並盡量使用公開 CA 憑證。
-- RADIUS secret 預設 8 碼、網段預設不限來源，只是為了方便初次設定。上線前請加長 secret 並縮小網段。
-- 管理介面使用 Flask 內建伺服器，請只開放給管理者的網段。
 
 ## 更新
 
