@@ -160,3 +160,25 @@ pre.cert-info { margin: 8px 0; padding: 10px; overflow-x: auto; background: var(
 .release-notes { white-space: pre-wrap; background: var(--bg); border-radius: 8px; padding: 10px 12px; font-size: 14px; }
 .key-text, .install-log { white-space: pre-wrap; word-break: break-all; background: var(--bg); padding: 10px; border-radius: 8px; font-size: 13px; }
 .install-log { max-height: 320px; overflow: auto; }
+/* 設定頁：區塊由左到右排列，寬度不夠時自動換行；手機為單欄 */
+.page.settings-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 360px), 1fr)); gap: 16px; align-items: start; }
+.page.settings-grid > .notice, .page.settings-grid > .span-all { grid-column: 1 / -1; }
+.page.settings-grid > .notice { margin-bottom: 0; }
+.page.settings-grid > .span-2 { grid-column: span 2; }
+@media (max-width: 900px) { .page.settings-grid > .span-2 { grid-column: 1 / -1; } }
+.form-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: 24px; align-items: start; }
+.form-cols h2 { margin: 0; font-size: 16px; }
+.page.settings-grid > .section { margin-top: 0; min-width: 0; }
+.page.settings-grid > .span-all form.stack { flex-direction: row; flex-wrap: wrap; align-items: flex-end; gap: 12px; }
+.page.settings-grid > .span-all form.stack label { flex: 1 1 260px; max-width: 420px; }
+.page.settings-grid textarea, .page.settings-grid input:not([type="checkbox"]):not([type="radio"]):not([type="file"]) { max-width: 100%; box-sizing: border-box; }
+.page.settings-grid input[type="file"] { max-width: 100%; }
+/* 憑證資訊：長名稱與指紋自動斷行，不撐開版面 */
+.cert-table { table-layout: fixed; width: 100%; }
+.cert-table th { width: 7.5em; text-align: left; vertical-align: top; white-space: normal; }
+.cert-table td, .cert-table td.mono { white-space: normal; overflow-wrap: anywhere; }
+.cert-table td.mono { word-break: break-all; }
+.cert-table .date { white-space: nowrap; }
+.cert-table th, .cert-table td { padding: 6px 8px; }
+.cert-table .small-text { font-size: 12px; }
+.ldap-cert.expiring { border-left: 4px solid var(--err-text); }

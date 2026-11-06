@@ -241,6 +241,36 @@ def x509_summary(pem_path):
     return result.stdout.strip() if result.returncode == 0 else ''
 
 
+def x509_details(pem_path):
+    """給網頁顯示的憑證資訊（第一張，也就是伺服器自己的憑證）。讀不到就回傳 None。"""
+    result = run(['openssl', 'x509', '-in', pem_path, '-noout', '-nameopt', 'utf8,sep_comma_plus,space_eq,-esc_msb',
+                  '-subject', '-issuer', '-startdate', '-enddate', '-fingerprint', '-sha256'], timeout=10)
+    if result.returncode != 0:
+        return None
+    values = {}
+    for line in result.stdout.splitlines():
+        key, _, value = line.partition('=')
+        values[key.strip().lower()] = value.strip()
+
+    def common_name(name):
+        match = re.search(r'(?:^|, )CN = (.*?)(?:, [A-Za-z]+ = |$)', name)
+        return match.group(1) if match else name
+
+    def when(text):
+        return datetime.datetime.strptime(text.replace('  ', ' '), '%b %d %H:%M:%S %Y %Z').replace(tzinfo=datetime.timezone.utc)
+
+    try:
+        start, end = when(values['notbefore']), when(values['notafter'])
+    except (KeyError, ValueError):
+        return None
+    days = (end - datetime.datetime.now(datetime.timezone.utc)).total_seconds() / 86400
+    fingerprint = values.get('sha256 fingerprint', '') or values.get('sha2-256 fingerprint', '')
+    return {'subject': common_name(values.get('subject', '')), 'issuer': common_name(values.get('issuer', '')),
+            'self_signed': values.get('subject') == values.get('issuer'),
+            'not_before': start.astimezone().strftime('%Y-%m-%d %H:%M'), 'not_after': end.astimezone().strftime('%Y-%m-%d %H:%M'),
+            'days_left': int(days // 1), 'fingerprint': fingerprint}
+
+
 def validate_cert_pair(cert_pem, key_pem):
     """Returns (certificate, key) as bytes after checking they parse, match and are not expired."""
     if not cert_pem or not key_pem:
@@ -263,12 +293,24 @@ def validate_cert_pair(cert_pem, key_pem):
     return cert_pem.encode(), key_pem.encode()
 
 
+# 自簽憑證的名稱可以是網域或任意文字（例如單位名稱）；-subj 的分隔字元與控制字元不允許
+CERT_NAME_RE = re.compile(r'[^\x00-\x1f\x7f/\\=+,;"<>]{1,64}')
+# 第一次安裝時單位名稱還不知道，先用這個名稱；初始化精靈填好單位名稱後改成「單位名稱 + woofradius」
+INITIAL_CERT_SUFFIX = 'woofradius'
+
+
 def self_signed(fqdn, ips=(), days=825):
+    name = fqdn.strip()
+    if not CERT_NAME_RE.fullmatch(name):
+        raise Refused('憑證名稱只能 1 到 64 個字，不可包含 / \\ = + , ; " < >')
     with tempfile.TemporaryDirectory(dir='/run') as tmp:
         cert, key = os.path.join(tmp, 'c.pem'), os.path.join(tmp, 'k.pem')
-        san = ','.join([f'DNS:{fqdn}'] + [f'IP:{ip}' for ip in ips])
-        result = run(['openssl', 'req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-nodes', '-sha256', '-days', str(days),
-                      '-keyout', key, '-out', cert, '-subj', f'/CN={fqdn}', '-addext', f'subjectAltName={san}'], timeout=30)
+        san = ','.join(([f'DNS:{name}'] if DOMAIN_RE.fullmatch(name) else []) + [f'IP:{ip}' for ip in ips])
+        cmd = ['openssl', 'req', '-x509', '-utf8', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-nodes', '-sha256', '-days', str(days),
+               '-keyout', key, '-out', cert, '-subj', f'/CN={name}']
+        if san:
+            cmd += ['-addext', f'subjectAltName={san}']
+        result = run(cmd, timeout=30)
         if result.returncode != 0:
             raise Refused(f'無法產生憑證：{output_tail(result)}')
         return read_bytes(cert), read_bytes(key)
@@ -555,24 +597,53 @@ def action_google_disable(params):
     return {'ok': True, 'message': 'Google 帳號驗證已停用，憑證與存取憑證已刪除'}
 
 
-def action_eap_cert(params):
-    mode = params.get('mode')
-    if mode == 'self_signed':
-        fqdn = text_param(params, 'fqdn', DOMAIN_RE)
-        cert, key = self_signed(fqdn)
-    elif mode == 'upload':
-        cert, key = validate_cert_pair(params.get('cert_pem', ''), params.get('key_pem', ''))
-    else:
-        raise Refused('不支援的憑證方式')
+def install_eap_cert(cert, key, auto):
     tx = Transaction()
     tx.write(EAP_CERT, cert)
     tx.write(EAP_KEY, key)
     commit_freeradius(tx)
-    return {'ok': True, 'summary': x509_summary(EAP_CERT)}
+    state = load_state()
+    state['eap_cert_auto'] = auto
+    save_state(state)
+
+
+def action_eap_cert(params):
+    mode = params.get('mode')
+    if mode == 'self_signed':
+        name = text_param(params, 'name', maximum=256)   # 長度與字元由 self_signed 檢查，錯誤訊息比較清楚
+        cert, key = self_signed(name)
+    elif mode == 'upload':
+        cert, key = validate_cert_pair(params.get('cert_pem', ''), params.get('key_pem', ''))
+    else:
+        raise Refused('不支援的憑證方式')
+    install_eap_cert(cert, key, False)
+    return {'ok': True, 'summary': x509_summary(EAP_CERT), 'details': x509_details(EAP_CERT)}
+
+
+def action_eap_cert_initial(params):
+    """初始化精靈填好單位名稱時呼叫：安裝時自動產生的憑證改用「單位名稱 + woofradius」重新產生。
+    管理者自己產生或上傳過憑證後就不再改動。"""
+    org = text_param(params, 'org_name', maximum=60)
+    if not load_state().get('eap_cert_auto'):
+        return {'ok': True, 'changed': False}
+    name = re.sub(r'[\x00-\x1f\x7f/\\=+,;"<>]', '', org)[:64 - len(INITIAL_CERT_SUFFIX)] + INITIAL_CERT_SUFFIX
+    current = x509_details(EAP_CERT)
+    if current and current['subject'] == name:
+        return {'ok': True, 'changed': False}
+    cert, key = self_signed(name)
+    install_eap_cert(cert, key, True)
+    return {'ok': True, 'changed': True, 'name': name}
 
 
 def action_eap_cert_info(params):
-    return {'ok': True, 'summary': x509_summary(EAP_CERT)}
+    return {'ok': True, 'summary': x509_summary(EAP_CERT), 'details': x509_details(EAP_CERT)}
+
+
+def action_ldap_cert_info(params):
+    """Google Secure LDAP 用戶端憑證的有效期限（Google 管理控制台發的憑證有到期日，要提前更換）。"""
+    text = (read_bytes(LDAP_CONF) or b'').decode()
+    configured = bool(re.search(r'^identity = "(.*)"$', text, re.M)) and 'identity = "not-configured"' not in text
+    return {'ok': True, 'configured': configured, 'details': x509_details(LDAP_CERT) if configured else None}
 
 
 def action_web_cert(params):
@@ -1250,7 +1321,8 @@ ACTIONS = {
     'radius_clients': action_radius_clients, 'timezone': action_timezone,
     'ad_join': action_ad_join, 'ad_test': action_ad_test, 'ad_disable': action_ad_disable,
     'google_configure': action_google_configure, 'google_test': action_google_test, 'google_disable': action_google_disable,
-    'eap_cert': action_eap_cert, 'eap_cert_info': action_eap_cert_info, 'web_cert': action_web_cert,
+    'eap_cert': action_eap_cert, 'eap_cert_initial': action_eap_cert_initial, 'eap_cert_info': action_eap_cert_info,
+    'ldap_cert_info': action_ldap_cert_info, 'web_cert': action_web_cert,
     'proxy_configure': action_proxy_configure, 'proxy_test': action_proxy_test, 'proxy_disable': action_proxy_disable,
     'update_check': action_update_check, 'update_key': action_update_key, 'update_verify': action_update_verify,
     'update_backups': action_update_backups, 'update_start': action_update_start, 'config_export': action_config_export,
@@ -1348,9 +1420,10 @@ def render():
         write_file(CLIENTS, clients_conf('', [], local), 0o640)
     if not os.path.exists(EAP_CERT):
         os.makedirs(EAP_CERT_DIR, exist_ok=True)
-        cert, key = self_signed(socket.getfqdn() if DOMAIN_RE.fullmatch(socket.getfqdn()) else 'radius.invalid')
+        cert, key = self_signed(INITIAL_CERT_SUFFIX)
         write_file(EAP_CERT, cert, 0o640)
         write_file(EAP_KEY, key, 0o640)
+        state['eap_cert_auto'] = True
     shutil.chown(EAP_CERT_DIR, 'root', 'freerad')
     os.chmod(EAP_CERT_DIR, 0o750)
     if not os.path.exists(LDAP_CONF) or not os.path.exists(LDAP_CERT):

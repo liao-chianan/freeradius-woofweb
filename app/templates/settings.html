@@ -1,13 +1,16 @@
 {% extends "base.html" %}
 {% block title %}系統設定 - radius 登入管理{% endblock %}
-{% block page_class %}narrow{% endblock %}
+{% block page_class %}settings-grid{% endblock %}
 {% block content %}
-<section class="card">
+<section class="card section span-2">
     <h1>系統設定</h1>
     <p class="muted">單位名稱、RADIUS 用戶端、AD 與 Google 驗證、憑證請到 <a href="{{ base }}/settings/system">主機與驗證設定</a>。</p>
     {% if error %}<div class="notice error" role="alert">{{ error }}</div>{% endif %}
     {% if message %}<div class="notice success" role="status">{{ message }}</div>{% endif %}
     <form method="POST" class="stack">
+      <div class="form-cols">
+      <div class="stack">
+        <h2>紀錄保留</h2>
         <label>每台裝置、每個 AD 帳號與每個 Google 帳號保留的登入紀錄筆數
             <input name="login_retention" inputmode="numeric" value="{{ retention }}" required>
             <small class="muted">預設 50，可設定 1 到 {{ maximum }}。</small></label>
@@ -16,6 +19,9 @@
         <label>驗證失敗紀錄保留天數
             <input name="fail_retention_days" inputmode="numeric" value="{{ fail_days }}" required>
             <small class="muted">預設 14，可設定 1 到 {{ max_fail_days }}。</small></label>
+      </div>
+      <div class="stack">
+        <h2>裝置數限制</h2>
         <label>每個 AD 或 Google 帳號在一個週期內可登入的裝置數
             <input name="device_limit" inputmode="numeric" value="{{ device_limit }}" required>
             <small class="muted">預設 3，0 表示不限制，最多 {{ max_device_limit }}。以 MAC 計算；同一週期內用過的裝置不受影響。同名的 AD 與 Google 帳號分開計算。立即生效，不需重啟 FreeRADIUS。</small></label>
@@ -27,6 +33,8 @@
         <label>不受裝置數限制的帳號
             <textarea name="exempt" rows="4">{{ exempt }}</textarea>
             <small class="muted">一行一個帳號，例如共用帳號或管理者帳號。AD 帳號直接填寫，Google 帳號要寫成 google:帳號（不含 @ 之後）；兩者分開設定，填 AD 帳號不會排除同名的 Google 帳號。</small></label>
+      </div>
+      </div>
         <button type="submit" class="btn primary">儲存</button>
     </form>
 </section>

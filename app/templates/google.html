@@ -1,6 +1,21 @@
 {% extends "base.html" %}
 {% block title %}Google 帳號 - radius 登入管理{% endblock %}
 {% block content %}
+{% if ldap_cert is not none %}
+{% set c = ldap_cert.details if ldap_cert.ok else none %}
+<section class="card section ldap-cert{% if c and c.days_left < 60 %} expiring{% endif %}">
+  <h2>Google Secure LDAP 憑證</h2>
+  {% if not ldap_cert.ok %}<p class="notice error">讀不到 LDAP 憑證資訊：{{ ldap_cert.error }}</p>
+  {% elif not c %}<p class="notice error">Google 驗證已啟用，但讀不到 LDAP 用戶端憑證。</p>
+  {% else %}
+  <p>有效期限：<strong>{{ c.not_after }}</strong>
+    {% if c.days_left < 0 %}<span class="status-off">已過期，Google 帳號目前無法登入 Wi-Fi</span>
+    {% elif c.days_left < 60 %}<span class="status-off">剩 {{ c.days_left }} 天，請盡快更換</span>
+    {% else %}<span class="muted">（剩 {{ c.days_left }} 天）</span>{% endif %}</p>
+  <p class="muted">憑證到期後所有 Google 帳號都無法登入 Wi-Fi。請在到期前到 Google 管理控制台的「LDAP 用戶端」產生新憑證，再到<a href="{{ base }}/settings/system#google">主機與驗證設定</a>上傳並重新驗證。</p>
+  {% endif %}
+</section>
+{% endif %}
 {% include "_group_policy.html" %}
 {% include "_blacklist.html" %}
 <div class="toolbar"><div class="toolbar-title"><h1>Google 帳號</h1><span class="count">共 {{ accounts|length }} 個帳號</span></div>

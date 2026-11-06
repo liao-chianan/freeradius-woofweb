@@ -87,13 +87,14 @@
     {% endif %}
   {% elif step == 'cert' %}
     <h1>RADIUS 伺服器憑證</h1>
-    <p class="muted">裝置連 Wi-Fi 時會看到這張憑證，名稱就是使用者要核對的伺服器名稱。安裝時已先產生一張暫時的自簽憑證。</p>
-    {% if cert_info %}<pre class="cert-info">{{ cert_info }}</pre>{% endif %}
+    <p class="muted">裝置連 Wi-Fi 時會看到這張憑證，名稱就是使用者要核對的伺服器名稱。系統已用「單位名稱 + woofradius」產生自簽憑證，可直接使用，也可以改名重新產生或上傳。</p>
+    {% set cert = cert_details %}{% include "_cert_details.html" %}
     <form method="POST" class="stack" enctype="multipart/form-data" autocomplete="off">
-      <label>伺服器名稱（FQDN）<input name="fqdn" value="{{ fqdn or settings.get('radius_fqdn', '') }}" placeholder="radius.example.org"></label>
       <label>憑證方式
-        <select name="cert_mode"><option value="self_signed">產生自簽憑證</option><option value="upload">上傳憑證（建議用公開 CA）</option></select>
+        <select name="cert_mode"><option value="self_signed">重新產生自簽憑證</option><option value="upload">上傳憑證（建議用公開 CA）</option></select>
         <small class="muted">公開 CA 憑證讓裝置比較容易信任，並能避免使用者接受假 AP 的憑證。Google 驗證的密碼會進入這個加密通道，請特別注意。</small></label>
+      <label>自簽憑證名稱<input name="cert_name" maxlength="64" value="{{ cert_name }}">
+        <small class="muted">使用者信任憑證時看到的名稱，可用單位名稱或網域，不可包含 / \ = + , ; " &lt; &gt;。之後更換憑證，已連過的裝置要先忘記 SSID 才能重新連線。</small></label>
       <div class="field-grid">
         <label>完整憑證鏈 fullchain<input type="file" name="cert_file" accept=".pem,.crt"></label>
         <label>私鑰 privkey<input type="file" name="key_file" accept=".pem,.key"></label>

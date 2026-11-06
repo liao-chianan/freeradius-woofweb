@@ -1,8 +1,8 @@
 {% extends "base.html" %}
 {% block title %}主機與驗證設定 - radius 登入管理{% endblock %}
-{% block page_class %}narrow{% endblock %}
+{% block page_class %}settings-grid{% endblock %}
 {% block content %}
-<section class="card">
+<section class="card section span-all">
   <h1>主機與驗證設定</h1>
   <p class="muted">其他設定在 <a href="{{ base }}/settings">系統設定</a>，管理者帳號與來源 IP 在 <a href="{{ base }}/account">帳號設定</a>。版本 {{ version }}。</p>
   {% if org_error %}<div class="notice error" role="alert">{{ org_error }}</div>{% endif %}
@@ -74,11 +74,15 @@
 <section class="card section" id="cert">
   <h2>RADIUS 伺服器憑證</h2>
   {% set res = cert_result %}{% include "_steps_result.html" %}
-  {% if cert_info %}<pre class="cert-info">{{ cert_info }}</pre>{% endif %}
-  <form method="POST" class="stack" enctype="multipart/form-data" autocomplete="off">
+  <p class="muted">裝置連 Wi-Fi（AD、Google、Proxy 代理）時會看到這張憑證，第一次連線時使用者要核對名稱並選擇信任。</p>
+  {% set cert = cert_details %}{% include "_cert_details.html" %}
+  <p class="notice warning">重新產生或更換憑證後，已經連過的裝置會因為憑證不同而連不上：請使用者在 Wi-Fi 設定裡「忘記」（清除）這個 SSID，再重新連線並信任新憑證。MAC 名單認證的裝置不受影響。</p>
+  <form method="POST" class="stack" enctype="multipart/form-data" autocomplete="off"
+        data-confirm="更換 RADIUS 伺服器憑證後，已連過的裝置都要先忘記這個 SSID 才能重新連線，FreeRADIUS 也會重新啟動。確定要繼續嗎？">
     <input type="hidden" name="action" value="eap_cert">
-    <label>伺服器名稱（FQDN）<input name="fqdn" value="{{ settings.get('radius_fqdn', '') }}" placeholder="radius.example.org"></label>
-    <label>憑證方式<select name="cert_mode"><option value="self_signed">產生自簽憑證</option><option value="upload">上傳憑證（建議用公開 CA）</option></select></label>
+    <label>憑證方式<select name="cert_mode"><option value="self_signed">重新產生自簽憑證</option><option value="upload">上傳憑證（建議用公開 CA）</option></select></label>
+    <label>自簽憑證名稱<input name="cert_name" maxlength="64" value="{{ settings.get('radius_fqdn') or (cert_details.subject if cert_details and cert_details.self_signed else settings.get('org_name', '') ~ 'woofradius') }}" placeholder="例如：{{ settings.get('org_name', '') }}woofradius">
+      <small class="muted">使用者信任憑證時看到的名稱，可用單位名稱或網域（例如 radius.example.org），不可包含 / \ = + , ; " &lt; &gt;。上傳憑證時不使用。</small></label>
     <div class="field-grid">
       <label>完整憑證鏈 fullchain<input type="file" name="cert_file" accept=".pem,.crt"></label>
       <label>私鑰 privkey<input type="file" name="key_file" accept=".pem,.key"></label>
@@ -100,3 +104,4 @@
   </form>
 </section>
 {% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='failures.js') }}"></script>{% endblock %}

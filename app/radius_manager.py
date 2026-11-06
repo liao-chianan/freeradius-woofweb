@@ -1971,7 +1971,8 @@ def google_accounts():
     index = ap_index()
     detail = [{'time': datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S'), 'mac': mac, 'ssid': split_called(called)[1],
                'ap_name': ap_name_for(called, ip, nas_ip, index)} for ts, mac, called, ip, nas_ip in logins]
-    return render_template('google.html', group_policy=group_policy_view('google'), blacklist=blacklist, accounts=rows, selected=selected, detail=detail, device_limit=limit['limit'])
+    ldap_cert = helper_call('ldap_cert_info', timeout=15) if load_settings().get('google_enabled') else None
+    return render_template('google.html', ldap_cert=ldap_cert, group_policy=group_policy_view('google'), blacklist=blacklist, accounts=rows, selected=selected, detail=detail, device_limit=limit['limit'])
 
 
 @app.route('/failures')
@@ -2883,7 +2884,13 @@ def apply_google(form):
 def apply_eap_cert(form):
     if form.get('cert_mode') == 'upload':
         return helper_call('eap_cert', mode='upload', cert_pem=uploaded_text('cert_file'), key_pem=uploaded_text('key_file'))
-    return helper_call('eap_cert', mode='self_signed', fqdn=form.get('fqdn', ''))
+    return helper_call('eap_cert', mode='self_signed', name=form.get('cert_name', ''))
+
+
+def setup_cert_extra(current):
+    info = helper_call('eap_cert_info', timeout=30)
+    details = info.get('details') or {}
+    return {'cert_details': details, 'cert_name': details.get('subject') or (current.get('org_name', '') + 'woofradius')}
 
 
 # ---- 初始化精靈 ----
@@ -2968,7 +2975,7 @@ def setup_page(step):
         if step == 'ssid':
             extra = {'rules': setup_ssid_default() if not os.path.exists(SSID_RULES_FILE) else load_ssid_rules(), 'default_vlan': current.get('default_vlan', DEFAULT_VLAN)}
         if step == 'cert':
-            extra = {'cert_info': helper_call('eap_cert_info', timeout=30).get('summary', '')}
+            extra = setup_cert_extra(current)
         return setup_render(step, **extra)
     form = request.form
     action = form.get('action', 'save')
@@ -2981,6 +2988,10 @@ def setup_page(step):
         if not result.get('ok'):
             return setup_render(step, 400, error=result.get('error'))
         update_settings(org_name=name, timezone=timezone)
+        # 安裝時自動產生的 RADIUS 憑證改用「單位名稱 + woofradius」，裝置信任時不會看到無意義的名稱
+        result = helper_call('eap_cert_initial', org_name=name, timeout=60)
+        if not result.get('ok'):
+            flash(f"RADIUS 憑證沒有改名：{result.get('error', '')}，可在「RADIUS 伺服器憑證」步驟重新產生", 'error')
         return setup_advance(step)
     if step == 'admin':
         username = form.get('username', '').strip()
@@ -3033,10 +3044,10 @@ def setup_page(step):
         if action == 'skip':
             return setup_advance(step)
         result = apply_eap_cert(form)
-        info = helper_call('eap_cert_info', timeout=30).get('summary', '')
         if not result.get('ok'):
-            return setup_render(step, 400, error=result.get('error'), cert_info=info, fqdn=form.get('fqdn', ''))
-        update_settings(radius_fqdn=form.get('fqdn', '').strip())
+            return setup_render(step, 400, error=result.get('error'), **{**setup_cert_extra(load_settings()), 'cert_name': form.get('cert_name', '')})
+        if form.get('cert_mode') != 'upload':
+            update_settings(radius_fqdn=form.get('cert_name', '').strip())
         return setup_advance(step)
     if step == 'ssid':
         rules = []
@@ -3068,7 +3079,7 @@ def system_render(status=200, **values):
     return render_template('system.html', settings=current, client_ip=request.remote_addr, version=app_version(),
                            secret=values.pop('secret', current.get('radius_secret', '')),
                            networks=values.pop('networks', '\n'.join(current.get('radius_networks', []))),
-                           cert_info=helper_call('eap_cert_info', timeout=30).get('summary', ''), **values), status
+                           cert_details=helper_call('eap_cert_info', timeout=30).get('details'), **values), status
 
 
 @app.route('/settings/system', methods=['GET', 'POST'])
@@ -3114,8 +3125,10 @@ def system_settings():
         return system_render(google_result=result)
     if action == 'eap_cert':
         result = apply_eap_cert(form)
-        if result.get('ok') and form.get('fqdn', '').strip():
-            update_settings(radius_fqdn=form.get('fqdn', '').strip())
+        if result.get('ok'):
+            if form.get('cert_mode') != 'upload':
+                update_settings(radius_fqdn=form.get('cert_name', '').strip())
+            log_change({'op': 'EAP_CERT', 'mode': form.get('cert_mode', ''), 'after': (result.get('details') or {}).get('subject', '')})
         return system_render(200 if result.get('ok') else 400, cert_result=result)
     if action == 'web_cert':
         result = helper_call('web_cert', cert_pem=uploaded_text('cert_file'), key_pem=uploaded_text('key_file'))
