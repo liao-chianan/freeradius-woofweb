@@ -6,16 +6,19 @@
 
 感謝freeradius原始開發團隊 https://github.com/FreeRADIUS/
 
-# 既有功能說明：
+# 支援認證方式(依 SSID 關鍵字決定驗證方式與 VLAN)：
 
-- **放行裝置名單**：以 MAC 認證，可依裝置指定 VLAN
-- **AD 帳號**：PEAP-MSCHAPv2，透過 winbind 驗證
-- **Google Workspace 帳號**：透過 Secure LDAP 驗證，Google SSID 優先提議 EAP-TTLS，內層接受 PAP 與 GTC
-- **Wi-Fi 使用權限**：在 AD 帳號頁勾選群組、在 Google 帳號頁勾選機構，只有勾選的才能通過驗證（預設不限制）
-- **黑名單**：AD 帳號頁與 Google 帳號頁各有黑名單，名單內的帳號一律拒絕（優先於群組與裝置數設定）；Google 以完整 email 比對
-- **Proxy 代理**：指定的 SSID 以可選的外層（PEAP、TTLS）與內層（MSCHAPv2、PAP、GTC）連到本機，確認帳號符合黑白名單（關鍵字）後把內層驗證轉給外部 RADIUS（MSCHAPv2 以 MS-CHAPv2、PAP 與 GTC 以 PAP），並依 SSID 規則指派 VLAN；成功與失敗都有紀錄
-- **SSID 規則**：依 SSID 關鍵字決定驗證方式與 VLAN
-- **登入紀錄、驗證失敗歷史、AP 管理、每個帳號的裝置數上限**
+- **放行裝置MAC名單**：可判斷SSID來源，透過以 MAC 認證白名單放行，可依裝置指定 VLAN
+- **AD 帳號**：可判斷SSID來源，結合外部AD/Samba dc，透過winbind搭配PEAP-MSCHAPv2進行驗證，具備群組放行與黑名單機制，可設定單日單一帳號使用裝置上限
+- **Google Workspace 帳號**：可判斷SSID來源，開啟Google Workspace LDAP功能後，透過Google Secure LDAP 驗證，具備機構放行與黑名單機制，可設定單日單一帳號使用裝置上限
+- **Proxy 代理**：可判斷SSID來源，將使用者認證機制轉發至外部radius(像是eduroam)，具備帳號黑白名單（關鍵字）機制，可設定單日單一帳號使用裝置上限
+
+# 系統功能：
+- **平台相容性最佳化**：ios / android / windows 可直接連線，無須另外安裝描述檔或特定軟體
+- **自訂憑證**：可自簽憑證或引入外部CA
+- **管控功能**：AD帳號/Google帳號支援群組放行與黑名單機制，亦可限制單一帳號每天僅能用幾台設備連線，Proxy 代理具備帳號黑白名單（關鍵字）機制，亦可限制單一帳號每天僅能用幾台設備連線
+- **稽核紀錄**：所有裝置認證成功/失敗都有紀錄，可設定保留紀錄天數，並可透過AP管理，自行匯入AP設備清冊，比對使用者透過哪一台AP上線
+
 
 ## 安裝方式
 在一台全新的 Debian 13 上，用一行指令裝好 FreeRADIUS 與網頁管理介面，管理學校或企業 Wi-Fi 的 802.1X 認證。
