@@ -183,3 +183,8 @@ pre.cert-info { margin: 8px 0; padding: 10px; overflow-x: auto; background: var(
 .cert-table .small-text { font-size: 12px; }
 .ldap-cert.expiring { border-left: 4px solid var(--err-text); }
 .short-input { max-width: 8em; }
+
+/* 認證效能：每小時登入次數 */
+.hour-table td { min-width: 140px; position: relative; }
+.hour-bar { display: inline-block; height: 12px; vertical-align: middle; background: var(--primary, #2563eb); border-radius: 3px; max-width: calc(100% - 44px); }
+.hour-n { margin-left: 6px; font-size: 13px; color: var(--muted); }

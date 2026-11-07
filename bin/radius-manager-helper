@@ -9,6 +9,8 @@ again. External commands never go through a shell and secrets never go on a comm
   radius-manager-helper render    install FreeRADIUS templates (install and upgrade)
   radius-manager-helper update-run update <version> | rollback <backup id>
                                   (started in the background by the update_start action)
+  radius-manager-helper bench-run authentication benchmark on an isolated copy
+                                  (started in the background by the bench_start action)
 """
 import datetime
 import hashlib
@@ -1317,6 +1319,293 @@ def update_run(kind, arg):
         shutil.rmtree(work, ignore_errors=True)
 
 
+# ---- 認證效能測試 ----
+# 複製一份 FreeRADIUS 設定到 /run，綁 127.0.0.1 的另一個 port，用本機測試帳號與測試 MAC 跑。
+# 登入紀錄、裝置上限資料庫都寫到測試目錄（${logdir} 改到測試目錄），結束就刪除；不碰正式的 1812、名單與紀錄。
+# AD（ntlm_auth 與網域控制站）、Google LDAP、外部 Proxy 不在測試範圍：測試帳號用本機密碼。
+BENCH_STATUS = f'{STATE_DIR}/bench-status.json'
+BENCH_DIR = '/run/radius-manager-bench'
+BENCH_UNIT = 'radius-manager-bench'
+BENCH_ACCOUNT = 'woofbench'
+BENCH_MAC = '02-57-4F-4F-46-01'
+BENCH_AP = '02-57-4F-4F-46-AA'
+BENCH_SSID_MAC = 'WoofBench-Device'
+BENCH_SSID_PEAP = 'WoofBench-Staff'
+EAPOL_TEST = '/usr/bin/eapol_test'
+
+
+def bench_write(status):
+    write_file(BENCH_STATUS, json.dumps({**status, 'updated': time.strftime('%Y-%m-%d %H:%M:%S')}, ensure_ascii=False).encode(),
+               0o640, 'root', SERVICE_USER)
+
+
+def bench_running():
+    return run(['systemctl', 'is-active', '--quiet', BENCH_UNIT]).returncode == 0
+
+
+def action_bench_start(params):
+    if bench_running():
+        raise Refused('已有測試正在進行')
+    if update_running():
+        raise Refused('版本更新進行中，請稍後再測試')
+    bench_write({'state': 'running', 'phase': '準備中', 'phases': [], 'started': time.strftime('%Y-%m-%d %H:%M:%S')})
+    helper = os.path.realpath(os.path.join(APP_ROOT, 'bin', 'radius-manager-helper'))
+    result = run(['systemd-run', f'--unit={BENCH_UNIT}', '--collect', '--quiet', '--description=freeradius-woofweb benchmark',
+                  '-p', 'RuntimeMaxSec=300', helper, 'bench-run'], timeout=30)
+    if result.returncode != 0:
+        bench_write({'state': 'failed', 'phases': [], 'error': f'無法啟動：{output_tail(result)}'})
+        raise Refused(f'無法啟動：{output_tail(result)}')
+    return {'ok': True}
+
+
+def cpu_info():
+    model = ''
+    try:
+        for line in open('/proc/cpuinfo', encoding='utf-8', errors='replace'):
+            if line.startswith('model name'):
+                model = line.split(':', 1)[1].strip()
+                break
+    except OSError:
+        pass
+    mem = 0
+    try:
+        for line in open('/proc/meminfo', encoding='utf-8'):
+            if line.startswith('MemTotal:'):
+                mem = int(line.split()[1]) // 1024
+    except OSError:
+        pass
+    # LXC 可能限制可用的 CPU：以這個程序能用的 CPU 為準
+    return {'cpus': len(os.sched_getaffinity(0)), 'model': model, 'mem_mb': mem}
+
+
+def proc_cpu_seconds(pid):
+    """FreeRADIUS 本身加上已結束的子程序（SSID 規則、裝置上限等每次登入執行的程式）。"""
+    with open(f'/proc/{pid}/stat', encoding='utf-8') as f:
+        fields = f.read().rsplit(')', 1)[1].split()
+    return sum(int(v) for v in fields[11:15]) / os.sysconf('SC_CLK_TCK')
+
+
+def host_cpu():
+    with open('/proc/stat', encoding='utf-8') as f:
+        values = [int(v) for v in f.readline().split()[1:]]
+    idle = values[3] + (values[4] if len(values) > 4 else 0)
+    return sum(values) - idle, sum(values)
+
+
+def proc_rss_mb(pid):
+    try:
+        for line in open(f'/proc/{pid}/status', encoding='utf-8'):
+            if line.startswith('VmRSS:'):
+                return int(line.split()[1]) // 1024
+    except OSError:
+        pass
+    return 0
+
+
+def pap_encrypt(secret, authenticator, password):
+    data = password.ljust(max(16, (len(password) + 15) // 16 * 16), b'\x00')
+    out, last = b'', authenticator
+    for i in range(0, len(data), 16):
+        key = hashlib.md5(secret + last).digest()
+        last = bytes(a ^ b for a, b in zip(data[i:i + 16], key))
+        out += last
+    return out
+
+
+def bench_mac_once(sock, secret, port):
+    """名單（MAC）認證一次，跟 AP 送的一樣（含 Message-Authenticator）。回傳 accept、reject 或 timeout。"""
+    user = BENCH_MAC.replace('-', '').lower().encode()
+    ident, authenticator = secrets.randbelow(256), secrets.token_bytes(16)
+    attrs = [(1, user), (2, pap_encrypt(secret, authenticator, user)), (4, socket.inet_aton('127.0.0.1')), (61, struct.pack('!I', 19)),
+             (30, f'{BENCH_AP}:{BENCH_SSID_MAC}'.encode()), (31, BENCH_MAC.encode())]
+    body = b''.join(struct.pack('BB', t, len(v) + 2) + v for t, v in attrs) + struct.pack('BB', 80, 18) + b'\x00' * 16
+    packet = struct.pack('!BBH', 1, ident, 20 + len(body)) + authenticator + body
+    packet = packet[:-16] + hmac.new(secret, packet, hashlib.md5).digest()
+    sock.sendto(packet, ('127.0.0.1', port))
+    deadline = time.monotonic() + 5
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return 'timeout'
+        sock.settimeout(remaining)
+        try:
+            reply = sock.recv(4096)
+        except socket.timeout:
+            return 'timeout'
+        if len(reply) >= 20 and reply[1] == ident:
+            return 'accept' if reply[0] == 2 else 'reject'
+
+
+def bench_peap_once(conf, secret, port):
+    result = run([EAPOL_TEST, '-c', conf, '-a', '127.0.0.1', '-p', str(port), '-s', secret.decode(), '-M', BENCH_MAC.replace('-', ':'),
+                  '-N', f'30:s:{BENCH_AP}:{BENCH_SSID_PEAP}', '-t', '15', '-r', '0'], timeout=20)
+    if result.returncode == 0 and 'SUCCESS' in result.stdout:
+        return 'accept'
+    return 'timeout' if result.returncode == 124 or 'EAPOL test timed out' in result.stdout else 'reject'
+
+
+def bench_phase(name, kind, workers, seconds, pid, once):
+    import threading
+    latencies, outcomes = [], {'accept': 0, 'reject': 0, 'timeout': 0}
+    lock = threading.Lock()
+    stop_at = time.monotonic() + seconds
+
+    def worker():
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) if kind == 'mac' else None
+        try:
+            while time.monotonic() < stop_at:
+                start = time.monotonic()
+                outcome = once(sock)
+                took = time.monotonic() - start
+                with lock:
+                    outcomes[outcome] += 1
+                    if outcome == 'accept':
+                        latencies.append(took)
+        finally:
+            if sock:
+                sock.close()
+    cpu0, host0, wall0 = proc_cpu_seconds(pid), host_cpu(), time.monotonic()
+    threads = [threading.Thread(target=worker, daemon=True) for _ in range(workers)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=seconds + 40)
+    wall = time.monotonic() - wall0
+    cpu1, host1 = proc_cpu_seconds(pid), host_cpu()
+    server_cpu = cpu1 - cpu0
+    total = sum(outcomes.values())
+    busy = (host1[0] - host0[0]) / max(1, host1[1] - host0[1])
+    latencies.sort()
+
+    def pct(p):
+        return round(latencies[min(len(latencies) - 1, int(len(latencies) * p))] * 1000) if latencies else None
+    info = cpu_info()
+    per_login = server_cpu / outcomes['accept'] if outcomes['accept'] else None
+    return {'name': name, 'kind': kind, 'workers': workers, 'seconds': round(wall, 1), **outcomes, 'total': total,
+            'rate': round(outcomes['accept'] / wall, 1) if wall else 0,
+            'p50_ms': pct(0.5), 'p95_ms': pct(0.95), 'max_ms': round(latencies[-1] * 1000) if latencies else None,
+            'server_cpu_pct': round(server_cpu / wall * 100) if wall else 0,
+            'host_cpu_pct': round(busy * info['cpus'] * 100),
+            'cpu_ms_per_login': round(per_login * 1000, 1) if per_login else None,
+            # 只算 FreeRADIUS 自己用的 CPU，假設測試程式不在這台、全部 CPU 都給 FreeRADIUS 時的上限
+            'estimate': round(info['cpus'] / per_login, 1) if per_login else None}
+
+
+def free_udp_port():
+    for port in range(18190, 18290):
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.bind(('127.0.0.1', port))
+            return port
+        except OSError:
+            continue
+        finally:
+            s.close()
+    raise Refused('找不到可用的測試 port')
+
+
+def bench_prepare(secret):
+    """回傳 (raddb 副本, eapol_test 設定檔)。"""
+    shutil.rmtree(BENCH_DIR, ignore_errors=True)
+    os.makedirs(BENCH_DIR, mode=0o750)
+    shutil.chown(BENCH_DIR, 'root', 'freerad')
+    raddb = os.path.join(BENCH_DIR, 'raddb')
+    shutil.copytree(RADDB, raddb, symlinks=True)
+    # copytree 不保留擁有者：FreeRADIUS 以 freerad 讀設定，照原檔設定擁有者
+    for root, dirs, files in os.walk(RADDB):
+        for name in [''] + dirs + files:
+            src = os.path.join(root, name)
+            st = os.lstat(src)
+            os.lchown(os.path.join(raddb, os.path.relpath(src, RADDB)), st.st_uid, st.st_gid)
+    for d in ('log', 'log/macauth', 'log/radacct', 'run'):
+        os.makedirs(os.path.join(BENCH_DIR, d), mode=0o770, exist_ok=True)
+        shutil.chown(os.path.join(BENCH_DIR, d), 'freerad', 'freerad')
+    conf = read_bytes(f'{raddb}/radiusd.conf').decode()
+    for name, value in (('raddbdir', raddb), ('logdir', f'{BENCH_DIR}/log'), ('run_dir', f'{BENCH_DIR}/run')):
+        conf, count = re.subn(rf'^{name}\s*=.*$', f'{name} = {value}', conf, count=1, flags=re.M)
+        if not count:
+            raise Refused(f'radiusd.conf 沒有 {name}，無法建立測試環境')
+    write_file(f'{raddb}/radiusd.conf', conf.encode(), 0o640)
+    write_file(f'{raddb}/clients.conf', f'client woofbench {{\n\tipaddr = 127.0.0.1\n\tsecret = {secret.decode()}\n}}\n'.encode(), 0o640)
+    password = secrets.token_hex(12)
+    users = read_bytes(f'{raddb}/mods-config/files/authorize') or b''
+    write_file(f'{raddb}/mods-config/files/authorize',
+               f'{BENCH_ACCOUNT} Cleartext-Password := "{password}", MS-CHAP-Use-NTLM-Auth := No\n\n'.encode() + users, 0o640)
+    macs = read_bytes(f'{raddb}/authorized_macs') or b''
+    write_file(f'{raddb}/authorized_macs', macs + (f'\n#{BENCH_ACCOUNT}\n{BENCH_MAC}\n        Tunnel-Type = 13,\n'
+                                                     '        Tunnel-Medium-Type = 6,\n        Tunnel-Private-Group-ID = 1\n\n').encode(), 0o640)
+    macauth = os.path.join(BENCH_DIR, 'log', 'macauth')
+    rules = {'rules': [{'keyword': BENCH_SSID_MAC, 'auth': 'mac', 'vlan': ''}, {'keyword': BENCH_SSID_PEAP, 'auth': 'ad', 'vlan': ''}],
+             'default': {'auth': 'ad', 'vlan': ''}}
+    # 上限 0（不限制）仍會寫入裝置資料庫，成本與正式環境相同
+    for name, data in (('ssid-rules.json', rules), ('device-limit.json', {'limit': 0, 'proxy_limit': 0, 'exempt': [], 'window_hours': 24}),
+                       ('blacklist.json', {'ad': [], 'google': []})):
+        write_file(os.path.join(macauth, name), json.dumps(data).encode(), 0o644, 'freerad', 'freerad')
+    eapol = os.path.join(BENCH_DIR, 'peap.conf')
+    write_file(eapol, ('network={\n\tkey_mgmt=WPA-EAP\n\teap=PEAP\n\tidentity="%s"\n\tanonymous_identity="anonymous"\n'
+                       '\tpassword="%s"\n\tphase2="auth=MSCHAPV2"\n}\n' % (BENCH_ACCOUNT, password)).encode(), 0o600, 'root', 'root')
+    return raddb, eapol
+
+
+def bench_run():
+    """在背景執行（systemd-run，最多 5 分鐘）。結果寫在 bench-status.json，網頁輪詢。"""
+    info = cpu_info()
+    status = {'state': 'running', 'phase': '建立測試環境', 'phases': [], 'host': info, 'started': time.strftime('%Y-%m-%d %H:%M:%S'),
+              'version': installed_version()}
+    bench_write(status)
+    server = None
+    try:
+        secret = secrets.token_hex(16).encode()
+        raddb, eapol = bench_prepare(secret)
+        port = free_udp_port()
+        log = open(os.path.join(BENCH_DIR, 'freeradius.out'), 'wb')
+        server = subprocess.Popen(['/usr/sbin/freeradius', '-f', '-d', raddb, '-n', 'radiusd', '-i', '127.0.0.1', '-p', str(port), '-lstdout'],
+                                  stdout=log, stderr=subprocess.STDOUT, env={**os.environ, 'LC_ALL': 'C.UTF-8'})
+        # 等測試實例可以回應（讀設定、載入憑證）
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        ready = False
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and server.poll() is None:
+            if bench_mac_once(probe, secret, port) == 'accept':
+                ready = True
+                break
+            time.sleep(0.5)
+        probe.close()
+        if not ready:
+            tail = (read_bytes(os.path.join(BENCH_DIR, 'freeradius.out')) or b'').decode('utf-8', 'replace').strip().splitlines()[-8:]
+            raise Refused('測試用的 FreeRADIUS 沒有正常啟動：' + ' / '.join(tail)[-600:])
+        status['port'] = port
+        many = min(32, max(8, info['cpus'] * 4))
+        plan = [('名單（MAC）認證・單一連線', 'mac', 1, 5), (f'名單（MAC）認證・{many * 2} 個同時', 'mac', many * 2, 10)]
+        if os.path.exists(EAPOL_TEST):
+            plan += [('PEAP-MSCHAPv2・單一連線', 'peap', 1, 8), (f'PEAP-MSCHAPv2・{many} 個同時', 'peap', many, 15)]
+        else:
+            status['note'] = '這台主機沒有 eapol_test（eapoltest 套件），只測名單認證。重新執行安裝程式會安裝。'
+        for name, kind, workers, seconds in plan:
+            status['phase'] = name
+            bench_write(status)
+            once = (lambda sock: bench_mac_once(sock, secret, port)) if kind == 'mac' else (lambda sock: bench_peap_once(eapol, secret, port))
+            status['phases'].append(bench_phase(name, kind, workers, seconds, server.pid, once))
+            bench_write(status)
+        status['rss_mb'] = proc_rss_mb(server.pid)
+        status['state'] = 'done'
+    except Refused as e:
+        status.update(state='failed', error=str(e))
+    except Exception as e:
+        status.update(state='failed', error=f'{type(e).__name__}: {e}')
+    finally:
+        if server and server.poll() is None:
+            server.terminate()
+            try:
+                server.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                server.kill()
+        shutil.rmtree(BENCH_DIR, ignore_errors=True)
+        status['phase'] = ''
+        status['finished'] = time.strftime('%Y-%m-%d %H:%M:%S')
+        bench_write(status)
+
+
 ACTIONS = {
     'radius_clients': action_radius_clients, 'timezone': action_timezone,
     'ad_join': action_ad_join, 'ad_test': action_ad_test, 'ad_disable': action_ad_disable,
@@ -1326,6 +1615,7 @@ ACTIONS = {
     'proxy_configure': action_proxy_configure, 'proxy_test': action_proxy_test, 'proxy_disable': action_proxy_disable,
     'update_check': action_update_check, 'update_key': action_update_key, 'update_verify': action_update_verify,
     'update_backups': action_update_backups, 'update_start': action_update_start, 'config_export': action_config_export,
+    'bench_start': action_bench_start,
 }
 
 
@@ -1455,5 +1745,7 @@ if __name__ == '__main__':
         render()
     elif command == 'update-run' and len(sys.argv) == 4 and sys.argv[2] in ('update', 'rollback'):
         update_run(sys.argv[2], sys.argv[3])
+    elif command == 'bench-run':
+        bench_run()
     else:
         sys.exit(__doc__)

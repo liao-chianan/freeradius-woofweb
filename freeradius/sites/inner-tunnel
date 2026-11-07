@@ -393,8 +393,20 @@ authenticate {
 	#  PAP authentication, when a back-end database listed
 	#  in the 'authorize' section supplies a password.  The
 	#  password can be clear-text, or encrypted.
+	#  radius-manager: 連線 Google LDAP 失敗（例如超過配額時存取憑證的 bind 被拒）rlm_ldap 不會留下 Module-Failure-Message，
+	#  補上訊息，失敗紀錄才不會被當成帳號不存在。結果與原本相同（fail 一樣是拒絕）。
 	Auth-Type ldap_google {
-		ldap_google
+		ldap_google {
+			fail = 1
+		}
+		if (fail) {
+			if (!&Module-Failure-Message) {
+				update request {
+					&Module-Failure-Message := "ldap_google: Cannot connect to Google LDAP"
+				}
+			}
+			reject
+		}
 	}
 
 	Auth-Type PAP {
@@ -423,7 +435,17 @@ authenticate {
 			}
 		}
 		elsif (&outer.session-state:Tmp-String-1 =~ /^google\|/) {
-			ldap_google
+			ldap_google {
+				fail = 1
+			}
+			if (fail) {
+				if (!&Module-Failure-Message) {
+					update request {
+						&Module-Failure-Message := "ldap_google: Cannot connect to Google LDAP"
+					}
+				}
+				reject
+			}
 		}
 		else {
 			pap

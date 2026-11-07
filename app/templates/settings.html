@@ -4,7 +4,7 @@
 {% block content %}
 <section class="card section span-2">
     <h1>系統設定</h1>
-    <p class="muted">單位名稱、RADIUS 用戶端、AD 與 Google 驗證、憑證請到 <a href="{{ base }}/settings/system">主機與驗證設定</a>。</p>
+    <p class="muted">單位名稱、RADIUS 用戶端、AD 與 Google 驗證、憑證請到 <a href="{{ base }}/settings/system">主機與驗證設定</a>；實際登入量與主機能處理多少登入請到 <a href="{{ base }}/settings/performance">認證效能</a>。</p>
     {% if error %}<div class="notice error" role="alert">{{ error }}</div>{% endif %}
     {% if message %}<div class="notice success" role="status">{{ message }}</div>{% endif %}
     <form method="POST" class="stack">

@@ -148,7 +148,7 @@ fi
 
 export DEBIAN_FRONTEND=noninteractive
 PACKAGES=(ca-certificates openssl wget git openssh-client python3 python3-flask python3-werkzeug
-  freeradius freeradius-ldap freeradius-utils winbind samba-common-bin libnss-winbind ldap-utils krb5-config)
+  freeradius freeradius-ldap freeradius-utils winbind samba-common-bin libnss-winbind ldap-utils krb5-config eapoltest)
 step "Updating the package lists (apt-get update)"
 apt-get update -o APT::Update::Error-Mode=any 2>&1 | sed 's/^/    /' \
   || die "apt cannot reach the package mirrors; check this host's DNS (/etc/resolv.conf) and internet access"

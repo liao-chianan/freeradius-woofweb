@@ -62,7 +62,10 @@ FAIL_REASONS = (('Proxy server rejected: E=691', '外部 RADIUS 拒絕：帳號�
                 ('0xc0000072', 'AD 帳號已停用'), ('0xc0000234', 'AD 帳號已鎖定'), ('0xc0000193', 'AD 帳號已過期'),
                 ('0xc0000071', 'AD 密碼已過期'), ('0xc0000224', 'AD 密碼必須變更'),
                 ('Google SSID requires', '裝置未使用 PEAP-GTC 或 EAP-TTLS/PAP'), ('ldap_google: User object not found', 'Google 帳號不存在'),
-                ('ldap_google: Empty password', '密碼空白'), ('ldap_google: Bind', 'Google 帳號或密碼錯誤'), ('ldap_google: ', 'Google LDAP 查詢失敗'),
+                ('ldap_google: Empty password', '密碼空白'),
+                # 超過 Google Secure LDAP 配額（resultCode 11）：必須在 'ldap_google: Bind' 之前，否則會被當成密碼錯誤
+                ('Administrative limit exceeded', 'Google LDAP 超過請求連線上限（短時間登入太多），稍後重試通常就會成功'),
+                ('ldap_google: Cannot connect to Google LDAP', '無法連線 Google LDAP（網路、憑證或配額）'), ('ldap_google: Bind', 'Google 帳號或密碼錯誤'), ('ldap_google: ', 'Google LDAP 查詢失敗'),
                 ('Daily device limit', '超過裝置數上限'), ('Account blacklisted', '帳號在黑名單中'), ('Wi-Fi group not allowed', '所屬群組或機構未開放 Wi-Fi'), ('SSID rule rejected', 'SSID 規則拒絕'),
                 ('unknown CA', '裝置不信任伺服器憑證'), ('previously rejected', '先前已被拒絕'),
                 ('No Auth-Type found', '此 SSID 不接受這種驗證方式'))
@@ -2204,6 +2207,134 @@ def update_export():
     log_change({'op': 'CONFIG_EXPORT', 'files': result.get('count'), 'bytes': len(data)})
     return Response(data, mimetype='application/gzip', headers={'Content-Disposition': f'attachment; filename={name}',
                                                                 'Cache-Control': 'no-store'})
+
+
+# ---- 認證效能測試與實際登入量 ----
+BENCH_STATUS_FILE = os.path.join(STATE_DIR, 'bench-status.json')
+TRAFFIC_KINDS = (('auth', '名單（MAC）'), ('ad', 'AD'), ('google', 'Google'), ('proxy', 'Proxy'), ('fail', '驗證失敗'))
+TRAFFIC_MAX_BYTES = 200 * 1024 * 1024
+GOOGLE_LDAP_QPS = 4
+
+
+def load_bench_status():
+    try:
+        with open(BENCH_STATUS_FILE, encoding='utf-8') as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {'state': 'none'}
+
+
+def traffic_stats():
+    """今天與昨天的原始登入紀錄（更早的已匯入資料庫並刪除，資料庫內每台裝置只留部分筆數，不能用來算尖峰）。
+    成功與失敗都算：每一次都是一次完整的認證。"""
+    parsers = {'auth': lambda p: (p[1], p[0]), 'ad': lambda p: (p[1], p[2]), 'google': lambda p: (p[1], p[2]),
+               'proxy': lambda p: (p[1], p[2]), 'fail': lambda p: (p[0], p[1])}
+    funcs = {'auth': parse_login_line, 'ad': parse_ad_login_line, 'google': parse_google_login_line,
+             'proxy': parse_proxy_login_line, 'fail': parse_fail_line}
+    events, read = [], 0
+    try:
+        names = sorted(n for n in os.listdir(AUTH_LOG_DIR) if AUTH_LOG_RE.fullmatch(n))
+    except OSError:
+        names = []
+    for name in names:
+        kind = AUTH_LOG_RE.fullmatch(name).group(1)
+        path = os.path.join(AUTH_LOG_DIR, name)
+        try:
+            size = os.path.getsize(path)
+            if read + size > TRAFFIC_MAX_BYTES:
+                continue
+            read += size
+            with open(path, 'rb') as f:
+                for raw in f:
+                    parsed = funcs[kind](raw.decode('utf-8', 'replace').rstrip('\n'))
+                    if parsed:
+                        ts, mac = parsers[kind](parsed)
+                        events.append((ts, kind, mac))
+        except OSError:
+            continue
+    if not events:
+        return None
+    events.sort()
+    counts = {k: 0 for k, _ in TRAFFIC_KINDS}
+    devices = {'mac': set(), 'eap': set()}
+    for ts, kind, mac in events:
+        counts[kind] += 1
+        if mac and kind != 'fail':
+            devices['mac' if kind == 'auth' else 'eap'].add(mac)
+
+    def peak(width, kinds=None):
+        buckets = {}
+        for ts, kind, _ in events:
+            if kinds is None or kind in kinds:
+                buckets[ts // width] = buckets.get(ts // width, 0) + 1
+        if not buckets:
+            return {'count': 0, 'time': ''}
+        key, count = max(buckets.items(), key=lambda item: (item[1], -item[0]))
+        return {'count': count, 'time': datetime.fromtimestamp(key * width).strftime('%m-%d %H:%M:%S')}
+    days = sorted({datetime.fromtimestamp(ts).strftime('%Y-%m-%d') for ts, _, _ in events})
+    hours = {day: [0] * 24 for day in days}
+    for ts, _, _ in events:
+        t = datetime.fromtimestamp(ts)
+        hours[t.strftime('%Y-%m-%d')][t.hour] += 1
+    top = max(max(v) for v in hours.values()) or 1
+    return {'total': len(events), 'counts': [(label, counts[k]) for k, label in TRAFFIC_KINDS if counts[k]],
+            'first': datetime.fromtimestamp(events[0][0]).strftime('%Y-%m-%d %H:%M'),
+            'last': datetime.fromtimestamp(events[-1][0]).strftime('%Y-%m-%d %H:%M'),
+            'peak_minute': peak(60), 'peak_10s': peak(10), 'peak_second': peak(1),
+            'peak_google_second': peak(1, {'google'}) if counts['google'] else None,
+            'mac_devices': len(devices['mac']), 'eap_devices': len(devices['eap']),
+            'days': days, 'hours': hours, 'hour_top': top}
+
+
+def capacity_assessment(traffic, bench):
+    """把測試結果與實際尖峰放在一起。容量用同時多個連線那一輪的實測值（測試程式在同一台，偏保守）。"""
+    if bench.get('state') != 'done' or not bench.get('phases'):
+        return None
+    best = {}
+    for phase in bench['phases']:
+        if phase.get('rate') and (phase['kind'] not in best or phase['workers'] > best[phase['kind']]['workers']):
+            best[phase['kind']] = phase
+    if not best:
+        return None
+    peap = best['peap']['rate'] if 'peap' in best else None
+    mac = best['mac']['rate'] if 'mac' in best else None
+    result = {'peap': peap, 'mac': mac, 'peap_estimate': best['peap'].get('estimate') if 'peap' in best else None}
+    if traffic:
+        peak10 = traffic['peak_10s']['count'] / 10
+        slowest = peap or mac
+        result['peak10_per_second'] = round(peak10, 1)
+        result['headroom'] = round(slowest / peak10, 1) if peak10 else None
+        seconds = traffic['mac_devices'] / mac if mac else 0
+        if traffic['eap_devices']:
+            seconds += traffic['eap_devices'] / slowest
+        result['reconnect_seconds'] = round(seconds, 1) if seconds < 10 else round(seconds)
+    return result
+
+
+@app.route('/settings/performance')
+@require_login
+def performance_page():
+    traffic = traffic_stats()
+    bench = load_bench_status()
+    return render_template('performance.html', traffic=traffic, bench=bench, assessment=capacity_assessment(traffic, bench),
+                           google_qps=GOOGLE_LDAP_QPS, settings=load_settings())
+
+
+@app.route('/settings/performance/start', methods=['POST'])
+@require_login
+def performance_start():
+    error = reauth_error(request.form.get('password'))
+    if error:
+        return jsonify(ok=False, error=error)
+    result = helper_call('bench_start', timeout=60)
+    log_change({'op': 'BENCHMARK', 'ok': bool(result.get('ok')), 'error': result.get('error', '')})
+    return jsonify(result)
+
+
+@app.route('/settings/performance/status')
+@require_login
+def performance_status():
+    return jsonify(ok=True, **load_bench_status())
 
 
 @app.route('/export')

@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+{% block title %}認證效能 - radius 登入管理{% endblock %}
+{% block content %}
+<div class="toolbar"><div class="toolbar-title"><h1>認證效能</h1><span class="count"><a href="{{ base }}/settings">回系統設定</a></span></div></div>
+
+<section class="card section">
+    <h2>這一頁在看什麼</h2>
+    <p class="muted">RADIUS 只在裝置連上 Wi-Fi 的那一刻參與認證（PEAP 約來回 8 到 12 個封包），之後的流量都走 AP，所以能「同時在線」幾台是 AP 與控制器決定的，不是這台主機。
+        這台主機要撐住的是<b>短時間內大量登入</b>：上課鐘響、AP 或交換器重開、停電復電後全部裝置一起重連。
+        下面先看最近實際的登入量，再用隔離的測試實例量出這台主機每秒能處理幾次登入，兩者對照就知道還有多少餘裕。</p>
+</section>
+
+<section class="card section">
+    <h2>實際登入量</h2>
+    {% if traffic %}
+    <p class="muted">統計 {{ traffic.first }} 到 {{ traffic.last }} 的原始紀錄（今天與昨天；更早的紀錄匯入資料庫後只保留部分筆數，不能用來算尖峰）。成功與失敗都算一次認證。</p>
+    <div class="stats">
+        <div class="stat"><b>{{ traffic.peak_minute.count }}</b><span>最忙的 1 分鐘（{{ traffic.peak_minute.time }}）</span></div>
+        <div class="stat"><b>{{ traffic.peak_10s.count }}</b><span>最忙的 10 秒（{{ traffic.peak_10s.time }}）</span></div>
+        <div class="stat"><b>{{ traffic.peak_second.count }}</b><span>最忙的 1 秒（{{ traffic.peak_second.time }}）</span></div>
+        <div class="stat"><b>{{ traffic.mac_devices + traffic.eap_devices }}</b><span>出現過的裝置（名單 {{ traffic.mac_devices }}、帳號登入 {{ traffic.eap_devices }}）</span></div>
+    </div>
+    <div class="table-wrap"><table class="compact">
+        <thead><tr><th>類別</th><th>次數</th></tr></thead>
+        <tbody>
+        {% for label, count in traffic.counts %}<tr><td>{{ label }}</td><td>{{ count }}</td></tr>{% endfor %}
+        <tr><td><b>合計</b></td><td><b>{{ traffic.total }}</b></td></tr>
+        </tbody>
+    </table></div>
+    {% if traffic.peak_google_second %}
+    <p class="muted">Google 帳號最忙的 1 秒有 {{ traffic.peak_google_second.count }} 次（{{ traffic.peak_google_second.time }}）。Google Secure LDAP 的配額是全網域共用每秒 {{ google_qps }} 次，超過會被 Google 拒絕，這是硬上限，與這台主機的效能無關。</p>
+    {% endif %}
+    <h3>每小時登入次數</h3>
+    <div class="table-wrap"><table class="compact hour-table">
+        <thead><tr><th>時段</th>{% for day in traffic.days %}<th>{{ day }}</th>{% endfor %}</tr></thead>
+        <tbody>
+        {% for hour in range(24) %}
+        <tr><td class="nowrap">{{ '%02d' % hour }}:00</td>
+            {% for day in traffic.days %}{% set n = traffic.hours[day][hour] %}
+            <td><span class="hour-bar" style="width: {{ (n * 100 / traffic.hour_top) | round(1) }}%"></span><span class="hour-n">{{ n if n else '' }}</span></td>
+            {% endfor %}
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table></div>
+    {% else %}
+    <p class="muted">今天與昨天還沒有任何登入紀錄。</p>
+    {% endif %}
+</section>
+
+<section class="card section">
+    <h2>效能測試</h2>
+    <p class="muted">複製一份目前的 FreeRADIUS 設定，在本機另一個 port 啟動測試實例，用測試帳號與測試 MAC 連續登入：先測名單（MAC）認證，再測 PEAP-MSCHAPv2（AD 帳號用的方式，含 TLS 交握、SSID 規則、裝置上限、群組與黑名單檢查）。
+        測試紀錄寫在暫存目錄，結束就刪除，<b>不會碰到正式的 1812、名單與登入紀錄</b>。全程約 1 分鐘。</p>
+    <ul class="muted">
+        <li><b>不含外部等待時間</b>：測試帳號用本機密碼，沒有詢問 AD 網域控制站、Google 或外部 Proxy。實際 AD 登入還要加上網域控制站的回應時間，所以實際容量會比這裡低。</li>
+        <li><b>測試程式也在這台主機上</b>，會和 FreeRADIUS 搶 CPU，「每秒處理」偏保守；「推估上限」只算 FreeRADIUS 自己用掉的 CPU，假設全部 CPU 都給它，偏樂觀。實際值在兩者之間。</li>
+        <li>真實裝置的網路延遲、重送、漫遊與 AP 的行為都模擬不到；這個數字適合用來比較硬體、確認有沒有餘裕，不是精確的保證。</li>
+        <li>測試期間 CPU 會滿載，正式的 Wi-Fi 認證可能變慢，建議在使用人數少的時候執行。</li>
+    </ul>
+    <div class="notice" id="bench-message" role="status" hidden></div>
+    <div class="actions"><button type="button" class="btn primary" id="bench-button" {% if bench.state == 'running' %}disabled{% endif %}>開始測試</button></div>
+    <div id="bench-progress" {% if bench.state != 'running' %}hidden{% endif %}><p><b>測試中：</b><span id="bench-phase">{{ bench.phase or '準備中' }}</span></p></div>
+
+    {% if bench.state == 'failed' %}
+    <div class="notice error" role="alert">上次測試（{{ bench.started }}）失敗：{{ bench.error }}</div>
+    {% endif %}
+    {% if bench.state == 'done' %}
+    <h3>測試結果（{{ bench.started }}，版本 {{ bench.version }}）</h3>
+    <p class="muted">主機：{{ bench.host.cpus }} 個 CPU{% if bench.host.model %}（{{ bench.host.model }}）{% endif %}、記憶體 {{ bench.host.mem_mb }} MB；測試實例使用記憶體 {{ bench.rss_mb }} MB。</p>
+    {% if bench.note %}<div class="notice warning">{{ bench.note }}</div>{% endif %}
+    <div class="table-wrap"><table class="compact">
+        <thead><tr><th>方式</th><th>完成</th><th>失敗</th><th>每秒處理</th><th>回應時間 中位數／95%／最慢</th><th>FreeRADIUS CPU</th><th>每次登入的 CPU</th><th>推估上限（每秒）</th></tr></thead>
+        <tbody>
+        {% for p in bench.phases %}
+        <tr><td>{{ p.name }}</td><td>{{ p.accept }}</td><td>{{ p.reject + p.timeout }}</td><td><b>{{ p.rate }}</b></td>
+            <td class="nowrap">{{ p.p50_ms }}／{{ p.p95_ms }}／{{ p.max_ms }} ms</td>
+            <td>{{ p.server_cpu_pct }}%（全機 {{ p.host_cpu_pct }}%）</td><td>{{ p.cpu_ms_per_login }} ms</td><td>{{ p.estimate }}</td></tr>
+        {% endfor %}
+        </tbody>
+    </table></div>
+    <p class="muted">CPU 百分比以一個核心為 100%。「每次登入的 CPU」包含 FreeRADIUS 每次登入執行的檢查程式（SSID 規則、裝置上限、群組與黑名單）。</p>
+    {% endif %}
+</section>
+
+{% if assessment %}
+<section class="card section">
+    <h2>評估</h2>
+    <ul>
+        {% if assessment.peap %}<li>這台主機每秒約可處理 <b>{{ assessment.peap }}</b> 次 PEAP 登入{% if assessment.peap_estimate %}（推估上限 {{ assessment.peap_estimate }}）{% endif %}{% if assessment.mac %}、<b>{{ assessment.mac }}</b> 次名單（MAC）認證{% endif %}。</li>
+        {% elif assessment.mac %}<li>這台主機每秒約可處理 <b>{{ assessment.mac }}</b> 次名單（MAC）認證。</li>{% endif %}
+        {% if assessment.peak10_per_second is defined %}
+        <li>最近兩天最忙的 10 秒平均每秒 <b>{{ assessment.peak10_per_second }}</b> 次登入{% if assessment.headroom %}，約是處理能力的 1/{{ assessment.headroom }}{% if assessment.headroom >= 5 %}，<b>餘裕充足</b>{% elif assessment.headroom >= 2 %}，還有餘裕，但尖峰時回應會變慢{% else %}，<b>已接近上限</b>，尖峰時可能有裝置逾時重試{% endif %}{% endif %}。</li>
+        <li>若最近兩天出現過的 {{ traffic.mac_devices + traffic.eap_devices }} 台裝置在同一時間重新連線（例如 AP 全部重開），全部完成認證約需 <b>{% if assessment.reconnect_seconds < 1 %}不到 1{% else %}{{ assessment.reconnect_seconds }}{% endif %}</b> 秒；裝置逾時後會自動重試，通常不需要處理。</li>
+        {% endif %}
+        {% if settings.ad_enabled %}<li>AD 帳號登入每次還要等網域控制站驗證密碼，實際速度也受網域控制站與網路影響。</li>{% endif %}
+        {% if settings.google_enabled %}<li>Google 帳號登入受 Google 配額限制（每秒 {{ google_qps }} 次），這個上限比這台主機低。</li>{% endif %}
+    </ul>
+</section>
+{% endif %}
+
+<dialog id="password-dialog" aria-labelledby="password-title">
+    <h2 id="password-title">確認管理者密碼</h2>
+    <p>測試約 1 分鐘，期間 CPU 會滿載，正式的 Wi-Fi 認證可能變慢。要開始嗎？</p>
+    <form id="password-form" class="stack">
+        <label>管理者密碼<input type="password" name="password" autocomplete="current-password" required></label>
+        <div class="dialog-actions">
+            <button type="button" class="btn" id="password-cancel">取消</button>
+            <button type="submit" class="btn primary">開始測試</button>
+        </div>
+    </form>
+</dialog>
+{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='performance.js') }}"></script>{% endblock %}
