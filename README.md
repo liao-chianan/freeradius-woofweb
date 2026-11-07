@@ -9,7 +9,7 @@
 # 支援認證方式(依 SSID 關鍵字決定驗證方式與 VLAN)：
 
 - **放行裝置MAC名單**：可判斷SSID來源，透過以 MAC 認證白名單放行，可依裝置指定 VLAN
-- **AD 帳號**：可判斷SSID來源，結合外部AD/Samba dc，透過winbind搭配PEAP-MSCHAPv2進行驗證，具備群組放行與黑名單機制，可設定單日單一帳號使用裝置上限
+- **AD 帳號**：可判斷SSID來源，結合AD或Samba dc，透過winbind搭配PEAP-MSCHAPv2進行驗證，具備群組放行與黑名單機制，可設定單日單一帳號使用裝置上限
 - **Google Workspace 帳號**：可判斷SSID來源，開啟Google Workspace LDAP功能後，透過Google Secure LDAP 驗證，具備機構放行與黑名單機制，可設定單日單一帳號使用裝置上限
 - **Proxy 代理**：可判斷SSID來源，將使用者認證機制轉發至外部radius(像是eduroam)，具備帳號黑白名單（關鍵字）機制，可設定單日單一帳號使用裝置上限
 
