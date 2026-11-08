@@ -1212,7 +1212,7 @@ CONFIG_FILES = (
     (KRB5_CONF, 'etc/krb5.conf'),
 )
 MACAUTH_DIR = '/var/log/freeradius/macauth'
-MACAUTH_SETTINGS = ('ssid-rules.json', 'device-limit.json', 'group-policy.json', 'blacklist.json', 'proxy-filter.json')
+MACAUTH_SETTINGS = ('ssid-rules.json', 'device-limit.json', 'group-policy.json', 'blacklist.json', 'group-vlan.json', 'proxy-filter.json')
 
 
 def build_config_archive(dest):

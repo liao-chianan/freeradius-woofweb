@@ -6,6 +6,7 @@
 {% if denied_accounts %}<div class="notice warning" role="status">目前週期有 {{ denied_accounts }} 個帳號因超過裝置數上限被拒絕，被拒絕的 MAC 標示在下方的裝置 MAC 欄。</div>{% endif %}
 {% include "_group_policy.html" %}
 {% include "_blacklist.html" %}
+{% include "_group_vlan.html" %}
 <div class="toolbar">
     <div class="toolbar-title"><h1>AD 帳號</h1><span class="count" id="row-count">共 {{ shown_count }} 筆</span></div>
     <form method="get" action="{{ base }}/ad" class="status-filter">
@@ -64,4 +65,4 @@
 </div>
 {% include "dialogs.html" %}
 {% endblock %}
-{% block scripts %}<script src="{{ url_for('static', filename='app.js') }}"></script>{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='app.js') }}"></script><script src="{{ url_for('static', filename='group-vlan.js') }}"></script>{% endblock %}

@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}確認額外 VLAN - radius 登入管理{% endblock %}
+{% block content %}
+<div class="toolbar"><div class="toolbar-title"><h1>確認額外 VLAN（{{ info.title }}）</h1></div></div>
+<p class="muted">還沒有儲存。確認後下一次登入立即生效；已連線的裝置不會斷線，下次認證時才換 VLAN。沒有套用額外 VLAN 的{{ info.member }}依 SSID 規則的 VLAN。</p>
+{% if conflicts %}<div class="notice warning" role="status">有{{ info.member }}同時屬於多個不同 VLAN 的群組，只有排在上面的群組生效，請確認順序。</div>{% endif %}
+<section class="card section">
+    <div class="table-wrap"><table class="compact"><tbody>
+        <tr><th>套用額外 VLAN</th><td>{{ assigned }} / {{ total }} {{ info.member }}</td></tr>
+        <tr><th>VLAN 會改變</th><td>{{ moved }} {{ info.member }}</td></tr>
+        <tr><th>各 VLAN 人數</th><td>{% for vlan, n in per_vlan %}<div>VLAN {{ vlan }}：{{ n }}</div>{% else %}<span class="muted">無</span>{% endfor %}</td></tr>
+        {% if reordered %}<tr><th>順序</th><td>已調整</td></tr>{% endif %}
+    </tbody></table></div>
+</section>
+{% if changes %}
+<section class="card section">
+    <h2>變更</h2>
+    <div class="table-wrap"><table class="compact">
+        <thead><tr><th>動作</th><th>{{ info.item }}</th><th>原本</th><th>改為</th></tr></thead>
+        <tbody>{% for action, name, old, new in changes %}<tr><td>{{ action }}</td><td>{{ name }}</td><td>{{ old or '—' }}</td><td>{{ new or '依 SSID 規則' }}</td></tr>{% endfor %}</tbody>
+    </table></div>
+</section>
+{% endif %}
+{% if conflicts %}
+<section class="card section">
+    <h2>同時屬於多個群組</h2>
+    <div class="table-wrap"><table class="compact">
+        <thead><tr><th>生效的群組</th><th>不生效的群組</th><th>帳號數</th></tr></thead>
+        <tbody>{% for c in conflicts %}<tr><td>{{ c.winner }}（VLAN {{ c.winner_vlan }}）</td><td>{{ c.loser }}（VLAN {{ c.loser_vlan }}）</td><td>{{ c.count }}</td></tr>{% endfor %}</tbody>
+    </table></div>
+</section>
+{% endif %}
+<section class="card section">
+    <h2>{% if source == 'ad' %}設定（依優先順序）{% else %}設定{% endif %}</h2>
+    <div class="table-wrap"><table class="compact">
+        <thead><tr>{% if source == 'ad' %}<th>順序</th>{% endif %}<th>{{ info.item }}</th><th>VLAN</th></tr></thead>
+        <tbody>{% for item in items %}<tr>{% if source == 'ad' %}<td>{{ loop.index }}</td>{% endif %}<td>{{ item.label }}</td><td>{{ item.vlan }}</td></tr>{% else %}<tr><td colspan="3" class="muted">沒有任何{{ info.item }}設定額外 VLAN，全部依 SSID 規則</td></tr>{% endfor %}</tbody>
+    </table></div>
+</section>
+<div class="card section confirm-bar">
+    <form method="post" action="{{ base }}/group-vlan/{{ source }}">
+        <input type="hidden" name="confirmed" value="1">
+        {% for item in items %}<input type="hidden" name="id" value="{{ item.id }}"><input type="hidden" name="vlan" value="{{ item.vlan }}">{% endfor %}
+        <button type="submit" class="btn primary">確認儲存</button>
+    </form>
+    <a class="btn" href="{{ base }}{{ info.page }}">取消</a>
+</div>
+{% endblock %}

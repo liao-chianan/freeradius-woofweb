@@ -736,6 +736,18 @@ post-auth {
 	update session-state {
 		&Tmp-String-1 !* ANY
 	}
+	#  radius-manager: AD 群組或 Google 機構的額外 VLAN（inner-tunnel 判斷）蓋過 SSID 規則的 VLAN。
+	#  不能在 authorize 直接改：authorize 每個封包都會依 SSID 規則重寫一次 session-state 的 Tunnel-*。
+	if (&session-state:Tmp-String-6) {
+		update session-state {
+			&Tunnel-Type := 13
+			&Tunnel-Medium-Type := 6
+			&Tunnel-Private-Group-ID := "%{session-state:Tmp-String-6}"
+		}
+		update session-state {
+			&Tmp-String-6 !* ANY
+		}
+	}
 	#  radius-manager: 記錄 AD 帳號認證成功（帳號由 inner-tunnel 傳來）
 	#  radius-manager: 記錄 Google 帳號登入成功
 	if (&session-state:Tmp-String-4) {

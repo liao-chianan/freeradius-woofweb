@@ -26,6 +26,9 @@ td.mono, td.strong { white-space: nowrap; }
 .ssid-table .order-col { width: 80px; }
 .ssid-table .vlan-col { width: 110px; }
 .ssid-table .auth-col { width: 180px; }
+.group-vlan-table input[name="vlan"] { width: 80px; padding: 5px 8px; font: inherit; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
+.group-vlan-table .order-col { width: 100px; }
+.group-vlan-table .vlan-col { width: 110px; }
 .ssid-default { display: flex; flex-wrap: wrap; gap: 12px; margin: 14px 0; }
 .ssid-default select, .ssid-default input { display: block; margin-top: 6px; padding: 7px 9px; font: inherit; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
 tr.changed td { background: var(--warn-bg, #fff6e0); }

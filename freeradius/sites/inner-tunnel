@@ -541,19 +541,25 @@ post-auth {
 	#  radius-manager: Google 帳號另外計算裝置數與登入紀錄，與同名 AD 帳號分開
 	if (&outer.session-state:Tmp-String-1 =~ /^google\|/) {
 		#  radius-manager: 黑名單與 Wi-Fi 群組限制。DN 是這次登入實際查到的，用 hex 傳，機構名稱可能有空白；DN 放最後。
-		#  放在裝置上限之前，被拒絕不佔裝置數。
-		if ("%{group_policy:/usr/local/sbin/radius-group-policy ${logdir}/macauth google %{User-Name} %{hex:&control:LDAP-UserDn}}" =~ /^(deny|blacklist)$/) {
+		#  放在裝置上限之前，被拒絕不佔裝置數。都通過時可能輸出機構的額外 VLAN（vlan:編號），交給外層 post-auth 蓋過 SSID 規則的 VLAN。
+		if ("%{group_policy:/usr/local/sbin/radius-group-policy ${logdir}/macauth google %{User-Name} %{hex:&control:LDAP-UserDn}}" =~ /^(deny|blacklist|vlan:([0-9]{1,4}))$/) {
 			if ("%{1}" == "blacklist") {
 				update request {
 					&Module-Failure-Message := "Account blacklisted"
 				}
+				reject
 			}
-			else {
+			elsif ("%{1}" == "deny") {
 				update request {
 					&Module-Failure-Message := "Wi-Fi group not allowed"
 				}
+				reject
 			}
-			reject
+			else {
+				update outer.session-state {
+					&Tmp-String-6 := "%{2}"
+				}
+			}
 		}
 		if ("%{device_limit:/usr/local/sbin/radius-device-limit google:%{User-Name} %{outer.request:Calling-Station-Id} ${logdir}/macauth}" == "deny") {
 			update request {
@@ -567,20 +573,27 @@ post-auth {
 		return
 	}
 
-	#  radius-manager: 黑名單與 Wi-Fi 群組限制，放在裝置上限之前，被拒絕不佔裝置數
+	#  radius-manager: 黑名單與 Wi-Fi 群組限制，放在裝置上限之前，被拒絕不佔裝置數。
+	#  都通過時可能輸出群組的額外 VLAN（vlan:編號），交給外層 post-auth 蓋過 SSID 規則的 VLAN。
 	if (&outer.request:User-Name) {
-		if ("%{group_policy:/usr/local/sbin/radius-group-policy ${logdir}/macauth ad %{%{Stripped-User-Name}:-%{User-Name}}}" =~ /^(deny|blacklist)$/) {
+		if ("%{group_policy:/usr/local/sbin/radius-group-policy ${logdir}/macauth ad %{%{Stripped-User-Name}:-%{User-Name}}}" =~ /^(deny|blacklist|vlan:([0-9]{1,4}))$/) {
 			if ("%{1}" == "blacklist") {
 				update request {
 					&Module-Failure-Message := "Account blacklisted"
 				}
+				reject
 			}
-			else {
+			elsif ("%{1}" == "deny") {
 				update request {
 					&Module-Failure-Message := "Wi-Fi group not allowed"
 				}
+				reject
 			}
-			reject
+			else {
+				update outer.session-state {
+					&Tmp-String-6 := "%{2}"
+				}
+			}
 		}
 	}
 

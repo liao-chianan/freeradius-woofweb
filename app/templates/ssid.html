@@ -4,7 +4,7 @@
 <div class="toolbar"><div class="toolbar-title"><h1>SSID 驗證與 VLAN</h1></div><div class="toolbar-actions"><button type="submit" form="ssid-form" class="btn primary">儲存並套用</button></div></div>
 {% if error %}<div class="notice error" role="alert">{{ error }}</div>{% endif %}
 <p class="muted">依順序由小到大比對，SSID 包含關鍵字（不分大小寫）就用該列的規則，第一個吻合的生效，例如「Device」會吻合 School_Device 和 School_2.4G_Device。</p>
-<p class="muted">VLAN 留白時，放行裝置名單用名單內每台裝置的 VLAN，AD 帳號不發 VLAN（由 AP 的 SSID 設定決定）。放行裝置規則填了 VLAN，會蓋過名單內的 VLAN。AP 或控制器要開啟 RADIUS 動態 VLAN，且該 VLAN 要接到 AP，否則裝置可能連不上網路。</p>
+<p class="muted">VLAN 留白時，放行裝置名單用名單內每台裝置的 VLAN，AD 帳號不發 VLAN（由 AP 的 SSID 設定決定）。AD 群組或 Google 機構設定了額外 VLAN 時，以群組（機構）的 VLAN 為主（在 AD 帳號、Google 帳號頁設定）。放行裝置規則填了 VLAN，會蓋過名單內的 VLAN。AP 或控制器要開啟 RADIUS 動態 VLAN，且該 VLAN 要接到 AP，否則裝置可能連不上網路。</p>
 <p class="muted">Google 帳號規則：裝置必須使用 PEAP-GTC 或 EAP-TTLS/PAP，帳號填完整 email，並驗證伺服器憑證。這會把使用者的 Google 密碼送到這台伺服器驗證，且驗證當下需要連得到 Google。</p>
 <form method="POST" action="{{ base }}/ssid" id="ssid-form" class="card section">
     <div class="table-wrap">

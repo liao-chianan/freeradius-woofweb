@@ -1,0 +1,23 @@
+{% set gv = group_vlan %}
+{% if gv.error %}<div class="notice error" role="alert">{{ gv.error }}</div>{% endif %}
+<details class="card section group-policy"{% if gv.configured %} open{% endif %}>
+    <summary>額外 VLAN（{{ gv.title }}）：{% if gv.configured %}<span>{{ gv.configured }} 個{{ gv.item }}有設定{% if gv.has_data %}，{{ gv.assigned }} / {{ gv.total }} {{ gv.member }}套用{% endif %}</span>{% else %}<span>未設定，依 SSID 規則的 VLAN</span>{% endif %}</summary>
+    {% if gv.rows %}
+    <form method="post" action="{{ base }}/group-vlan/{{ gv.source }}" class="group-vlan-form">
+        <p class="muted">{{ gv.item }}填了 VLAN，該{{ gv.item }}的{{ gv.member }}通過驗證後就發這個 VLAN，蓋過 SSID 規則的 VLAN；留白的依 SSID 規則。只影響{{ 'AD' if gv.source == 'ad' else 'Google' }}帳號登入，放行裝置名單與 Proxy 代理不受影響。
+            {% if gv.source == 'ad' %}一個帳號屬於多個有設定的群組時，<b>排在上面的優先</b>，可用 ↑ ↓ 調整順序（有設定的群組固定排在最前面）。成員包含主要群組與巢狀群組，每 5 分鐘從 AD 更新。
+            {% else %}上層機構的 VLAN 也套用到底下的子機構，子機構自己有設定時以子機構為準。登入時以 Google 當下回傳的機構為準。{% endif %}
+            已連線的裝置不會斷線，下次認證時才換 VLAN。AP 或控制器要開啟 RADIUS 動態 VLAN，且這些 VLAN 都要接到每台 AP，否則裝置會拿不到 IP。</p>
+        <div class="table-wrap group-policy-list"><table class="compact group-vlan-table">
+            <thead><tr>{% if gv.source == 'ad' %}<th class="order-col">順序</th>{% endif %}<th>{{ gv.item }}</th><th>{{ gv.member }}數</th><th class="vlan-col">額外 VLAN</th></tr></thead>
+            <tbody>{% for row in gv.rows %}<tr>
+                {% if gv.source == 'ad' %}<td class="order-col nowrap"><button type="button" class="btn small js-vlan-up" aria-label="{{ row.label }} 上移" hidden>↑</button> <button type="button" class="btn small js-vlan-down" aria-label="{{ row.label }} 下移" hidden>↓</button></td>{% endif %}
+                <td>{% if row.missing %}<span class="status-off">{{ row.label }}</span>{% else %}<a href="{{ base }}{{ '/ad/group' if gv.source == 'ad' else '/google/ou' }}?id={{ row.id|urlencode }}">{{ row.label }}</a>{% endif %}</td>
+                <td>{{ row.count }}</td>
+                <td class="vlan-col"><input type="hidden" name="id" value="{{ row.id }}"><input name="vlan" inputmode="numeric" maxlength="4" value="{{ row.vlan }}" aria-label="{{ row.label }} 額外 VLAN"></td>
+            </tr>{% endfor %}</tbody>
+        </table></div>
+        <button type="submit" class="btn primary">儲存</button>
+    </form>
+    {% else %}<p class="muted">目前還沒有{{ gv.item }}資料。</p>{% endif %}
+</details>

@@ -74,6 +74,7 @@ DEVICE_LIMIT_DB = os.path.join(AUTH_LOG_DIR, 'device-limit.db')
 SSID_RULES_FILE = os.path.join(AUTH_LOG_DIR, 'ssid-rules.json')
 GROUP_POLICY_FILE = os.path.join(AUTH_LOG_DIR, 'group-policy.json')
 BLACKLIST_FILE = os.path.join(AUTH_LOG_DIR, 'blacklist.json')
+GROUP_VLAN_FILE = os.path.join(AUTH_LOG_DIR, 'group-vlan.json')
 MAX_BLACKLIST = 2000
 GOOGLE_EMAIL_RE = re.compile(r'[^\s@|]{1,64}@[^\s@|]{1,190}')
 GOOGLE_DIR_FILE = os.path.join(STATE_DIR, 'google_directory.json')
@@ -872,6 +873,52 @@ def load_blacklist():
     return blacklist, ''
 
 
+def load_group_vlan():
+    """回傳 ({'ad': [{'id', 'vlan'}...], 'google': [...]}, 錯誤訊息)。AD 的順序就是優先順序。
+    檔案損毀時 FreeRADIUS 不發群組 VLAN（沿用 SSID 規則），要在頁面上警告。"""
+    config = {source: [] for source in GROUP_SOURCES}
+    try:
+        with open(GROUP_VLAN_FILE, encoding='utf-8') as f:
+            data = json.load(f)
+        for source in GROUP_SOURCES:
+            config[source] = [{'id': str(item['id']), 'vlan': str(item['vlan'])} for item in data[source]]
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        logging.error(f'group vlan unreadable: {e}')
+        return {source: [] for source in GROUP_SOURCES}, '額外 VLAN 設定檔無法讀取，目前所有帳號都依 SSID 規則的 VLAN，請重新儲存。'
+    return config, ''
+
+
+def group_vlan_assign(source, items, members):
+    """與 radius-group-policy 相同的判斷，回傳 {成員: 生效的設定}。
+    AD 依清單順序第一個符合的生效；Google 越下層的機構越優先（上層的設定也套用到子機構）。"""
+    if source == 'google':
+        items = sorted(items, key=lambda item: -len(google_ancestors(item['id'])))
+    result = {}
+    for item in items:
+        for member in members.get(item['id'], ()):
+            result.setdefault(member, item)
+    return result
+
+
+def group_vlan_view(source):
+    """ad.html、google.html 共用的額外 VLAN 區塊。有設定的依優先順序排最前面，其餘同 Wi-Fi 使用權限的排法。"""
+    options, members, everyone, updated = group_directory(source)
+    config, error = load_group_vlan()
+    items = config[source]
+    labels = {option['id']: option['label'] for option in options}
+    configured = [{'id': item['id'], 'label': labels.get(item['id'], f'（已不存在）{item["id"]}'), 'missing': item['id'] not in labels,
+                   'count': len(members.get(item['id'], ())), 'vlan': item['vlan']} for item in items]
+    taken = {item['id'] for item in items}
+    others = [{**option, 'missing': False, 'count': len(members.get(option['id'], ())), 'vlan': ''} for option in options if option['id'] not in taken]
+    others.sort(key=lambda row: (row['count'] == 0, row['label']))
+    assigned = group_vlan_assign(source, items, members)
+    return {'source': source, **GROUP_SOURCES[source], 'rows': configured + others if options else configured, 'error': error,
+            'configured': len(items), 'assigned': len(assigned.keys() & everyone), 'total': len(everyone), 'has_data': bool(options),
+            'updated': datetime.fromtimestamp(updated).strftime('%Y-%m-%d %H:%M:%S') if updated else ''}
+
+
 def blacklist_key(source, value):
     """AD 去掉網域、小寫；Google 是完整 email、小寫。格式不對回傳 None。"""
     value = value.strip()
@@ -1364,7 +1411,7 @@ def ad_users():
                    blacklisted=key in blocked, key=key)
     updated = datetime.fromtimestamp(status_time).strftime('%Y-%m-%d %H:%M:%S') if status_time else ''
     # 其他狀態的帳號也輸出（隱藏），搜尋 MAC 時才能提示它不在目前的篩選內
-    return render_template('ad.html', group_policy=group_policy_view('ad'), blacklist=blacklist, users=rows, shown_count=shown_count, q=request.args.get('q', '')[:64], defaults=default_attrs(),
+    return render_template('ad.html', group_policy=group_policy_view('ad'), group_vlan=group_vlan_view('ad'), blacklist=blacklist, users=rows, shown_count=shown_count, q=request.args.get('q', '')[:64], defaults=default_attrs(),
                            device_limit=limit['limit'], denied_accounts=len(today_denied),
                            window_hours=limit['window_hours'], window_start=window_start.strftime('%H:%M'),
                            window_end=window_end.strftime('%m-%d %H:%M'),
@@ -1432,6 +1479,75 @@ def group_policy_save(source):
         save_radius_json(GROUP_POLICY_FILE, policy)
         log_change({'op': 'GROUP_POLICY', 'source': source, 'before': before, 'after': policy[source]})
     flash(f'已儲存 Wi-Fi 限制，下一次登入生效：可使用 {len(after_members)} / {len(everyone)} {info["member"]}', 'success')
+    return redirect(info['page'])
+
+
+@app.route('/group-vlan/<source>', methods=['POST'])
+@require_login
+def group_vlan_save(source):
+    if source not in GROUP_SOURCES:
+        abort(404)
+    info = GROUP_SOURCES[source]
+    options, members, everyone, _ = group_directory(source)
+    labels = {option['id']: option['label'] for option in options}
+    ids, vlans = request.form.getlist('id'), request.form.getlist('vlan')
+    if len(ids) != len(vlans):
+        abort(400)
+    with data_lock():
+        config, _ = load_group_vlan()
+        before = config[source]
+        known = labels.keys() | {item['id'] for item in before}
+        items, errors, seen = [], [], set()
+        for item_id, vlan in zip(ids, vlans):
+            vlan = vlan.strip()
+            if not vlan or item_id in seen or item_id not in known:
+                continue
+            seen.add(item_id)
+            if not is_valid_number(vlan, 1, 4094):
+                errors.append(f'{labels.get(item_id, item_id)}：VLAN 必須是 1 到 4094 的數字')
+                continue
+            items.append({'id': item_id, 'vlan': str(int(vlan))})
+        if errors:
+            for error in errors[:10]:
+                flash(error, 'error')
+            return redirect(info['page'])
+        if items == before:
+            flash('額外 VLAN 沒有變更', 'success')
+            return redirect(info['page'])
+        label = lambda item_id: labels.get(item_id, f'（已不存在）{item_id}')
+        if request.form.get('confirmed') != '1':
+            old = {item['id']: item['vlan'] for item in before}
+            new = {item['id']: item['vlan'] for item in items}
+            changes = [('新增', label(i), '', v) for i, v in new.items() if i not in old]
+            changes += [('修改', label(i), old[i], v) for i, v in new.items() if i in old and old[i] != v]
+            changes += [('刪除', label(i), v, '') for i, v in old.items() if i not in new]
+            common_before = [item['id'] for item in before if item['id'] in new]
+            common_after = [item['id'] for item in items if item['id'] in old]
+            reordered = source == 'ad' and common_before != common_after
+            before_assign = group_vlan_assign(source, before, members)
+            after_assign = group_vlan_assign(source, items, members)
+            per_vlan = {}
+            for member in after_assign.keys() & everyone:
+                per_vlan[after_assign[member]['vlan']] = per_vlan.get(after_assign[member]['vlan'], 0) + 1
+            moved = sum(1 for member in everyone if (before_assign.get(member) or {}).get('vlan') != (after_assign.get(member) or {}).get('vlan'))
+            # AD 同時屬於多個不同 VLAN 的群組：只有排在前面的生效，列出來讓管理者確認順序
+            conflicts = {}
+            if source == 'ad':
+                for member in everyone:
+                    matched = [item for item in items if member in members.get(item['id'], ())]
+                    for loser in matched[1:]:
+                        if loser['vlan'] != matched[0]['vlan']:
+                            key = (matched[0]['id'], loser['id'])
+                            conflicts[key] = conflicts.get(key, 0) + 1
+            conflict_rows = sorted(({'winner': label(w), 'winner_vlan': new[w], 'loser': label(l), 'loser_vlan': new[l], 'count': n}
+                                    for (w, l), n in conflicts.items()), key=lambda row: -row['count'])
+            return render_template('group_vlan_preview.html', info=info, source=source, items=[{**item, 'label': label(item['id'])} for item in items],
+                                   changes=changes, reordered=reordered, per_vlan=sorted(per_vlan.items(), key=lambda kv: int(kv[0])),
+                                   assigned=sum(per_vlan.values()), total=len(everyone), moved=moved, conflicts=conflict_rows)
+        config[source] = items
+        save_radius_json(GROUP_VLAN_FILE, config)
+        log_change({'op': 'GROUP_VLAN', 'source': source, 'before': before, 'after': items})
+    flash(f'已儲存額外 VLAN，下一次登入生效：{len(items)} 個{info["item"]}', 'success')
     return redirect(info['page'])
 
 
@@ -2048,7 +2164,7 @@ def google_accounts():
     detail = [{'time': datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S'), 'mac': mac, 'ssid': split_called(called)[1],
                'ap_name': ap_name_for(called, ip, nas_ip, index)} for ts, mac, called, ip, nas_ip in logins]
     ldap_cert = helper_call('ldap_cert_info', timeout=15) if load_settings().get('google_enabled') else None
-    return render_template('google.html', ldap_cert=ldap_cert, group_policy=group_policy_view('google'), blacklist=blacklist, accounts=rows, selected=selected, detail=detail, device_limit=limit['limit'])
+    return render_template('google.html', ldap_cert=ldap_cert, group_policy=group_policy_view('google'), group_vlan=group_vlan_view('google'), blacklist=blacklist, accounts=rows, selected=selected, detail=detail, device_limit=limit['limit'])
 
 
 @app.route('/failures')

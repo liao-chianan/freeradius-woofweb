@@ -1,8 +1,10 @@
 #!/usr/bin/python3 -I
 """Wi-Fi 黑名單與群組限制：radius-group-policy <macauth 目錄> ad <帳號>，或 radius-group-policy <macauth 目錄> google <email> <使用者 DN 的 hex>。
-由 FreeRADIUS 在內層驗證成功後呼叫。帳號在黑名單輸出 blacklist，不在允許的群組輸出 deny，其餘情況不輸出。
+由 FreeRADIUS 在內層驗證成功後呼叫。帳號在黑名單輸出 blacklist，不在允許的群組輸出 deny；
+都通過且所屬群組（機構）設定了額外 VLAN 輸出 vlan:<編號>，其餘情況不輸出。
 DN 放最後：DN 是空的時參數可能少一個，此時只判斷黑名單。
-任何錯誤都放行：這支程式壞掉不可讓全校無法登入 Wi-Fi，管理頁會警告資料取不到。黑名單與群組各自判斷，一邊出錯不影響另一邊。"""
+任何錯誤都放行：這支程式壞掉不可讓全校無法登入 Wi-Fi，管理頁會警告資料取不到。黑名單、群組限制與 VLAN 各自判斷，一邊出錯不影響另一邊；
+VLAN 出錯時不輸出，沿用 SSID 規則的 VLAN。"""
 import json
 import os
 import re
@@ -53,9 +55,36 @@ def denied(directory, source, value):
         with open(os.path.join(directory, 'ad-members.json'), encoding='utf-8') as f:
             members = json.load(f)['members']
         return allowed.isdisjoint(members.get(normalize_account(value), []))
-    path = google_ou_path(bytes.fromhex(value).decode('utf-8', 'replace'))
+    path = google_path_dn(value)
     # 勾選上層機構就包含底下的子機構；空字串是最上層
     return allowed.isdisjoint('/'.join(path[:depth]) for depth in range(len(path) + 1))
+
+
+def google_path_dn(value):
+    return google_ou_path(bytes.fromhex(value).decode('utf-8', 'replace'))
+
+
+def group_vlan(directory, source, value):
+    """group-vlan.json：{"ad": [{"id": SID, "vlan": "30"}, ...], "google": [{"id": "四年級/A班", "vlan": "40"}, ...]}。
+    AD 一個帳號可能在多個群組，依清單順序第一個符合的生效；Google 每人只有一個機構，上層機構的設定會套用到子機構，
+    越下層越優先。沒有符合回傳空字串。"""
+    with open(os.path.join(directory, 'group-vlan.json'), encoding='utf-8') as f:
+        items = json.load(f)[source]
+    if not items:
+        return ''
+    if source == 'ad':
+        with open(os.path.join(directory, 'ad-members.json'), encoding='utf-8') as f:
+            groups = set(json.load(f)['members'].get(normalize_account(value), []))
+        candidates = [item for item in items if item['id'] in groups]
+    else:
+        path = google_path_dn(value)
+        by_id = {item['id']: item for item in items}
+        candidates = [by_id[key] for key in ('/'.join(path[:depth]) for depth in range(len(path), -1, -1)) if key in by_id]
+    for item in candidates:
+        vlan = str(item['vlan'])
+        if re.fullmatch(r'[0-9]{1,4}', vlan) and 1 <= int(vlan) <= 4094:
+            return str(int(vlan))
+    return ''
 
 
 def check(func, *args):
@@ -75,6 +104,11 @@ if __name__ == '__main__':
         if check(blacklisted, directory, source, account):
             print('blacklist')
         elif len(args) >= 4 or source == 'ad':
-            if check(denied, directory, source, account if source == 'ad' else args[3]):
+            value = account if source == 'ad' else args[3]
+            if check(denied, directory, source, value):
                 print('deny')
+            else:
+                vlan = check(group_vlan, directory, source, value)
+                if vlan:
+                    print(f'vlan:{vlan}')
     sys.exit(0)
