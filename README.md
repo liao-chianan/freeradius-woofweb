@@ -1,8 +1,9 @@
 # freeradius-woofweb專案介紹
 
 
-在Debian上配合開源專案freeradius的自製簡易管理web介面，用來管理校內的無線網路Wi-Fi 的 802.1X 認證
-後端驗證可搭配mac address白名單、google workspace帳號、samba AD帳號、以及外部proxy代理
+在Debian上配合開源專案freeradius的自製簡易管理web介面，用來管理校內的無線網路Wi-Fi 的 802.1X 認證，  
+通用各大廠牌無線網路設備(Unifi / Forti / Cisco / Mikrotik...)  
+後端驗證可搭配mac address白名單、google workspace帳號、samba AD帳號、以及外部proxy代理，並具備登入成功/失敗的稽核紀錄
 
 感謝freeradius原始開發團隊 https://github.com/FreeRADIUS/
 
