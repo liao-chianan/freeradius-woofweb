@@ -35,11 +35,29 @@ tr.changed td { background: var(--warn-bg, #fff6e0); }
 .stack label > select { display: block; width: 100%; margin-top: 6px; padding: 8px 10px; }
 .strong { font-weight: 600; }
 .topbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 24px; padding: 10px 24px; background: #17324f; }
-.brand { color: #fff; font-size: 17px; font-weight: 700; text-decoration: none; }
-.topnav { display: flex; flex-wrap: wrap; gap: 4px; }
+.brand { display: flex; align-items: center; gap: 12px; color: #fff; font-size: 17px; font-weight: 700; text-decoration: none; }
+.brand-logo { flex: none; width: 45px; height: 45px; object-fit: contain; }
+.logo-setting { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 20px; }
+.logo-setting .brand-logo { padding: 6px; background: #17324f; border-radius: 10px; box-sizing: content-box; }
+.logo-reset { margin-top: 10px; }
+.topnav { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .topnav a { color: #d6e2ef; padding: 6px 12px; border-radius: 6px; text-decoration: none; }
 .topnav a:hover { background: rgba(255,255,255,.1); color: #fff; }
 .topnav a.active { background: rgba(255,255,255,.18); color: #fff; }
+/* 上方選單分兩區：帳號與紀錄（藍）、系統管理（琥珀），登出在最右邊 */
+.nav-group { display: flex; flex-wrap: wrap; gap: 2px; padding: 3px; border-radius: 9px; }
+.nav-records { background: rgba(96, 165, 250, .16); box-shadow: inset 0 0 0 1px rgba(96, 165, 250, .35); }
+.nav-records a { color: #dbeafe; }
+.nav-records a:hover { background: rgba(96, 165, 250, .25); }
+.nav-records a.active { background: #3b82f6; color: #fff; }
+.nav-system { background: rgba(245, 180, 70, .13); box-shadow: inset 0 0 0 1px rgba(245, 180, 70, .35); }
+.nav-system a { color: #fde8c4; }
+.nav-system a:hover { background: rgba(245, 180, 70, .22); }
+.nav-system a.active { background: #b7791f; color: #fff; }
+.topnav a.nav-logout { margin-left: 8px; border: 1px solid rgba(255,255,255,.35); }
+.topnav a.nav-logout:hover { background: rgba(255,255,255,.12); }
+.link-button { padding: 0; border: 0; background: none; color: var(--primary); font: inherit; font-weight: inherit; text-align: left; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+.link-button:hover { color: var(--primary-dark); }
 .page { max-width: 1180px; margin: 0 auto; padding: 20px 24px 48px; }
 .page.narrow { max-width: 460px; }
 .page.narrow h1 { margin-bottom: 12px; }

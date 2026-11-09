@@ -1166,9 +1166,53 @@ def security_headers(response):
     return response
 
 
+LOGO_FILE = os.path.join(STATE_DIR, 'logo')
+LOGO_MAX_BYTES = 512 * 1024
+# 只接受點陣圖，用檔頭判斷，不信任副檔名；SVG 可內嵌腳本，不接受
+LOGO_TYPES = ((b'\x89PNG\r\n\x1a\n', 'image/png'), (b'\xff\xd8\xff', 'image/jpeg'), (b'GIF87a', 'image/gif'), (b'GIF89a', 'image/gif'))
+
+
+def logo_type(data):
+    for magic, mime in LOGO_TYPES:
+        if data.startswith(magic):
+            return mime
+    if data[:4] == b'RIFF' and data[8:12] == b'WEBP':
+        return 'image/webp'
+    return None
+
+
+def logo_url():
+    """自訂 logo 用 /logo（網址帶修改時間，換圖後瀏覽器會重新載入）；沒有就用內建的預設圖。"""
+    try:
+        return f'{request.script_root}/logo?v={int(os.path.getmtime(LOGO_FILE))}'
+    except OSError:
+        return url_for('static', filename='logo-default.png')
+
+
+def save_logo(item):
+    """回傳錯誤訊息，成功回傳空字串。"""
+    if not item or not item.filename:
+        return '請選擇圖片檔'
+    data = item.read(LOGO_MAX_BYTES + 1)
+    if len(data) > LOGO_MAX_BYTES:
+        return f'圖片不可超過 {LOGO_MAX_BYTES // 1024} KB'
+    if not logo_type(data):
+        return '只接受 PNG、JPEG、GIF 或 WebP 圖片'
+    fd, tmp = tempfile.mkstemp(dir=STATE_DIR, prefix='.logo-')
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, 'wb') as f:
+            f.write(data)
+        os.replace(tmp, LOGO_FILE)
+    except Exception:
+        os.unlink(tmp)
+        raise
+    return ''
+
+
 @app.context_processor
 def inject_site():
-    return {'base': request.script_root, 'org_name': load_settings().get('org_name', ''), 'app_version': app_version(),
+    return {'base': request.script_root, 'org_name': load_settings().get('org_name', ''), 'app_version': app_version(), 'logo_url': logo_url(),
             'ad_enabled': load_settings().get('ad_enabled', False), 'google_enabled': load_settings().get('google_enabled', False)}
 
 
@@ -1197,6 +1241,23 @@ def require_login(f):
         return f(*args, **kwargs)
     wrapper.__name__ = f.__name__
     return wrapper
+
+
+@app.route('/logo')
+@require_login
+def custom_logo():
+    try:
+        with open(LOGO_FILE, 'rb') as f:
+            data = f.read(LOGO_MAX_BYTES + 1)
+    except OSError:
+        return redirect(url_for('static', filename='logo-default.png'))
+    mime = logo_type(data)
+    if not mime or len(data) > LOGO_MAX_BYTES:
+        return redirect(url_for('static', filename='logo-default.png'))
+    response = Response(data, mimetype=mime)
+    response.headers['Cache-Control'] = 'private, max-age=86400'
+    response.headers['Content-Security-Policy'] = "default-src 'none'"
+    return response
 
 
 def plan_entry(form, entries):
@@ -1813,10 +1874,15 @@ def ad_logins():
     if not ACCOUNT_RE.fullmatch(account):
         return jsonify(ok=False, errors=['帳號格式錯誤']), 400
     ingest_logins()
+    return account_logins_json('ad_logins', account)
+
+
+def account_logins_json(table, account):
+    """AD、Google、Proxy 帳號的登入紀錄對話框共用。每個帳號保留的筆數是系統設定的 login_retention。"""
     retention = load_settings()['login_retention']
     conn = open_db()
     try:
-        rows = conn.execute('SELECT ts, ip, mac, called, nas_ip FROM ad_logins WHERE account = ? ORDER BY ts DESC, id DESC LIMIT ?', (account, retention)).fetchall()
+        rows = conn.execute(f'SELECT ts, ip, mac, called, nas_ip FROM {table} WHERE account = ? ORDER BY ts DESC, id DESC LIMIT ?', (account, retention)).fetchall()
     finally:
         conn.close()
     index = ap_index()
@@ -1824,6 +1890,27 @@ def ad_logins():
         {'time': datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S'), 'ip': ip, 'mac': mac,
          'ap_name': ap_name_for(called, ip, nas_ip, index),
          'ap_mac': split_called(called)[0], 'ssid': split_called(called)[1]} for ts, ip, mac, called, nas_ip in rows])
+
+
+@app.route('/google/logins')
+@require_login
+def google_logins():
+    account = request.args.get('account', '').strip().lower()
+    if not GOOGLE_EMAIL_RE.fullmatch(account):
+        return jsonify(ok=False, errors=['帳號格式錯誤']), 400
+    ingest_logins()
+    return account_logins_json('google_logins', account)
+
+
+@app.route('/proxy/logins')
+@require_login
+def proxy_logins():
+    """外部帳號格式不固定（可含網域），照紀錄原樣比對。"""
+    account = request.args.get('account', '')
+    if not account or len(account) > 254 or not account.isprintable():
+        return jsonify(ok=False, errors=['帳號格式錯誤']), 400
+    ingest_logins()
+    return account_logins_json('proxy_logins', account)
 
 
 def settings_limit_args(limit, **overrides):
@@ -2141,7 +2228,6 @@ def google_accounts():
     ingest_logins()
     limit = load_device_limit()
     counts, denied = device_limit_current(limit)
-    selected = request.args.get('account', '').strip().lower()[:254]
     conn = open_db()
     try:
         accounts = {}
@@ -2151,20 +2237,18 @@ def google_accounts():
             row['logins'] += total
             if mac:
                 row['macs'].append(mac)
-        logins = conn.execute('SELECT ts, mac, called, ip, nas_ip FROM google_logins WHERE account = ? ORDER BY ts DESC, id DESC', (selected,)).fetchall() if selected else []
     finally:
         conn.close()
     rows = sorted(accounts.values(), key=lambda row: -row['last_ts'])
     blacklist = blacklist_view('google')
+    # 姓名用 radius-manager-google-dir 的快取（每 15 分鐘更新），不即時查 Google
+    names = {user['email'].lower(): user.get('name', '') for user in load_google_directory()[0]}
     for row in rows:
         key = GOOGLE_LIMIT_PREFIX + normalize_account(row['account'])
-        row.update(key=key, blacklisted=row['account'].lower() in blacklist['names'], today=counts.get(key, 0), denied=denied.get(key, []), exempt=key in limit['exempt'],
+        row.update(key=key, name=names.get(row['account'].lower(), ''), blacklisted=row['account'].lower() in blacklist['names'], today=counts.get(key, 0), denied=denied.get(key, []), exempt=key in limit['exempt'],
                    last=datetime.fromtimestamp(row['last_ts']).strftime('%Y-%m-%d %H:%M:%S'))
-    index = ap_index()
-    detail = [{'time': datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S'), 'mac': mac, 'ssid': split_called(called)[1],
-               'ap_name': ap_name_for(called, ip, nas_ip, index)} for ts, mac, called, ip, nas_ip in logins]
     ldap_cert = helper_call('ldap_cert_info', timeout=15) if load_settings().get('google_enabled') else None
-    return render_template('google.html', ldap_cert=ldap_cert, group_policy=group_policy_view('google'), group_vlan=group_vlan_view('google'), blacklist=blacklist, accounts=rows, selected=selected, detail=detail, device_limit=limit['limit'])
+    return render_template('google.html', ldap_cert=ldap_cert, group_policy=group_policy_view('google'), group_vlan=group_vlan_view('google'), blacklist=blacklist, accounts=rows, device_limit=limit['limit'])
 
 
 @app.route('/failures')
@@ -2584,11 +2668,22 @@ def plan_import(rows, entries, mode):
 
 
 def clean_pending():
+    """只清自己產生的過期 <token>.json；其他東西（目錄、別人放的檔案）不動。清不掉不影響預覽，不可因此回 500。"""
     cutoff = time.time() - PENDING_MAX_AGE
-    for name in os.listdir(PENDING_DIR):
+    try:
+        names = os.listdir(PENDING_DIR)
+    except OSError as e:
+        logging.warning(f'clean pending failed: {e}')
+        return
+    for name in names:
+        if not re.fullmatch(r'[0-9a-f]{32}\.json', name):
+            continue
         path = os.path.join(PENDING_DIR, name)
-        if os.path.getmtime(path) < cutoff:
-            os.unlink(path)
+        try:
+            if os.path.isfile(path) and not os.path.islink(path) and os.path.getmtime(path) < cutoff:
+                os.unlink(path)
+        except OSError as e:
+            logging.warning(f'clean pending {name} failed: {e}')
 
 
 def pending_path(token):
@@ -3396,7 +3491,7 @@ def setup_page(step):
 # ---- 系統設定：單位、RADIUS 用戶端、AD、Google、憑證 ----
 def system_render(status=200, **values):
     current = load_settings()
-    return render_template('system.html', settings=current, client_ip=request.remote_addr, version=app_version(),
+    return render_template('system.html', settings=current, client_ip=request.remote_addr, version=app_version(), logo_custom=os.path.isfile(LOGO_FILE),
                            secret=values.pop('secret', current.get('radius_secret', '')),
                            networks=values.pop('networks', '\n'.join(current.get('radius_networks', []))),
                            cert_details=helper_call('eap_cert_info', timeout=30).get('details'), **values), status
@@ -3416,6 +3511,19 @@ def system_settings():
         update_settings(org_name=name)
         log_change({'op': 'ORG_NAME', 'after': name})
         return system_render(org_message='單位名稱已更新')
+    if action == 'logo':
+        error = save_logo(request.files.get('logo'))
+        if error:
+            return system_render(400, logo_error=error)
+        log_change({'op': 'LOGO', 'after': 'custom'})
+        return system_render(logo_message='Logo 已更新')
+    if action == 'logo_reset':
+        try:
+            os.unlink(LOGO_FILE)
+        except FileNotFoundError:
+            pass
+        log_change({'op': 'LOGO', 'after': 'default'})
+        return system_render(logo_message='已改回預設 logo')
     if action == 'radius':
         error = apply_radius_clients(form)
         if error:

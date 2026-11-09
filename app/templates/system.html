@@ -12,6 +12,24 @@
     <label>單位名稱<input name="org_name" value="{{ settings.get('org_name', '') }}" maxlength="60" required></label>
     <button class="btn primary">儲存</button>
   </form>
+  <h2 id="logo">Logo</h2>
+  {% if logo_error %}<div class="notice error" role="alert">{{ logo_error }}</div>{% endif %}
+  {% if logo_message %}<div class="notice success" role="status">{{ logo_message }}</div>{% endif %}
+  <div class="logo-setting">
+    <img src="{{ logo_url }}" alt="目前的 logo" width="45" height="45" class="brand-logo">
+    <div>
+      <form method="POST" enctype="multipart/form-data" class="stack">
+        <input type="hidden" name="action" value="logo">
+        <label>更換圖片<input type="file" name="logo" accept="image/png,image/jpeg,image/gif,image/webp" required>
+          <small class="muted">顯示在上方選單單位名稱的左邊，大小 45×45 像素；建議用正方形圖片，非正方形會等比例縮小。PNG、JPEG、GIF 或 WebP，512 KB 以內。</small></label>
+        <button class="btn primary">上傳</button>
+      </form>
+      {% if logo_custom %}<form method="POST" class="logo-reset" data-confirm="要改回預設的 logo 嗎？">
+        <input type="hidden" name="action" value="logo_reset">
+        <button class="btn">改回預設</button>
+      </form>{% endif %}
+    </div>
+  </div>
 </section>
 <section class="card section" id="radius">
   <h2>RADIUS 用戶端</h2>

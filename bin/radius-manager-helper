@@ -1198,6 +1198,7 @@ CONFIG_FILES = (
     (f'{STATE_DIR}/ap_list.json', 'var/lib/radius-manager/ap_list.json'),
     (f'{STATE_DIR}/metadata.json', 'var/lib/radius-manager/metadata.json'),
     (f'{STATE_DIR}/proxy.json', 'var/lib/radius-manager/proxy.json'),
+    (f'{STATE_DIR}/logo', 'var/lib/radius-manager/logo'),
     (ROOT_STATE, 'var/lib/radius-manager-root/state.json'),
     (f'{RADDB}/authorized_macs', 'etc/freeradius/3.0/authorized_macs'),
     (CLIENTS, 'etc/freeradius/3.0/clients.conf'),

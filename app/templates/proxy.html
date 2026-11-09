@@ -116,7 +116,7 @@
     <table class="compact">
         <thead><tr><th>外部帳號</th><th>裝置 MAC</th><th>週期裝置</th><th>最近登入</th><th>登入次數</th><th>依目前黑白名單</th></tr></thead>
         <tbody>{% for u in accounts %}<tr>
-            <td class="strong">{{ u.account }}</td>
+            <td class="strong"><button type="button" class="link-button js-account-logins" data-url="{{ base }}/proxy/logins?account={{ u.account|urlencode }}" data-label="{{ u.account }}" title="查看登入紀錄">{{ u.account }}</button></td>
             <td class="mono">{% for mac in u.macs %}<div>{{ mac }}</div>{% else %}<span class="muted">-</span>{% endfor %}{% for d in u.denied %}<div class="status-off" title="本週期被拒絕 {{ d.count }} 次，最後一次 {{ d.last }}">{{ d.mac }}<br>被拒絕</div>{% endfor %}</td>
             <td class="nowrap">{% if proxy_limit == 0 %}{{ u.period }}（不限）{% else %}{{ u.period }} / {{ proxy_limit }}{% endif %}{% if u.period or u.denied %}
                 <form method="post" action="{{ base }}/device-limit/reset" class="device-reset" data-confirm="要重置 {{ u.account }} 的裝置數嗎？">
@@ -127,7 +127,6 @@
             <td class="nowrap">{% if u.decision == 'allow' %}{{ u.decision_label }}{% else %}<span class="status-off">{{ u.decision_label }}</span>{% endif %}</td>
         </tr>{% endfor %}</tbody>
     </table>
-    <p class="muted">每個帳號保留的筆數與 AD、Google 帳號相同（系統設定的登入紀錄筆數）。</p>
     {% else %}<p class="muted">目前還沒有人經 Proxy 代理登入成功。</p>{% endif %}
 </div>
 
@@ -148,5 +147,6 @@
     <p class="muted">只列最近 {{ recent_limit }} 筆。完整紀錄與統計請到 <a href="{{ base }}/failures?by=proxy">驗證失敗歷史</a>（依外部帳號）。失敗時的帳號是裝置送出的，只能當線索。</p>
     {% else %}<p class="muted">沒有經 Proxy 代理的驗證失敗紀錄。</p>{% endif %}
 </div>
+{% include "_logins_dialog.html" %}
 {% endblock %}
-{% block scripts %}<script src="{{ url_for('static', filename='failures.js') }}"></script>{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='failures.js') }}"></script><script src="{{ url_for('static', filename='logins.js') }}"></script>{% endblock %}

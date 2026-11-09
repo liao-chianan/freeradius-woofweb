@@ -29,20 +29,7 @@
         </div>
     </div>
 </dialog>
-<dialog id="logins-dialog" class="wide" aria-labelledby="logins-title">
-    <h2 id="logins-title">登入紀錄</h2>
-    <p class="muted" id="logins-device"></p>
-    <div class="notice error" id="logins-error" role="alert" hidden></div>
-    <p class="empty" id="logins-empty" hidden>目前沒有成功登入的紀錄</p>
-    <div class="table-wrap logins-wrap" id="logins-wrap" hidden>
-        <table class="compact">
-            <thead id="logins-head"></thead>
-            <tbody id="logins-rows"></tbody>
-        </table>
-    </div>
-    <p class="muted" id="logins-note"></p>
-    <div class="dialog-actions"><button type="button" class="btn js-close">關閉</button></div>
-</dialog>
+{% include "_logins_dialog.html" %}
 <dialog id="import-dialog" aria-labelledby="import-title">
     <h2 id="import-title">匯入 CSV</h2>
     <form method="post" action="{{ base }}/import/preview" enctype="multipart/form-data" class="stack">
