@@ -1,8 +1,8 @@
 # freeradius-woofweb專案介紹
 
 
-在Debian上配合開源專案freeradius的自製簡易管理web介面，用來管理校內的無線網路Wi-Fi 的 802.1X 認證，  
-通用各大廠牌無線網路設備(Unifi / Forti / Cisco / Mikrotik...)  
+在Debian上配合開源專案freeradius的自製簡易管理web介面與mod，用來管理校內的無線網路Wi-Fi 的 802.1X 認證，  
+通用各大廠牌無線網路設備(Unifi / Forti / Cisco / Mikrotik...)，適合校內有多廠牌AP的管理情境  
 後端驗證可搭配mac address白名單、google workspace帳號、samba AD帳號、以及外部proxy代理，並具備登入成功/失敗的稽核紀錄
 
 感謝freeradius原始開發團隊 https://github.com/FreeRADIUS/
@@ -10,9 +10,9 @@
 # 支援認證方式(依 SSID 關鍵字決定驗證方式與 VLAN)：
 
 - **放行裝置MAC名單**：可判斷SSID來源，透過以 MAC 認證白名單放行，可依裝置指定 VLAN
-- **AD 帳號**：可判斷SSID來源，結合AD或Samba dc，透過winbind搭配PEAP-MSCHAPv2進行驗證，具備群組放行與黑名單機制，可設定單日單一帳號使用裝置上限
-- **Google Workspace 帳號**：可判斷SSID來源，開啟Google Workspace LDAP功能後，透過Google Secure LDAP 驗證，具備機構放行與黑名單機制，可設定單日單一帳號使用裝置上限
-- **Proxy 代理**：可判斷SSID來源，將使用者認證機制轉發至外部radius(像是eduroam)，具備帳號黑白名單（關鍵字）機制，可設定單日單一帳號使用裝置上限
+- **AD 帳號**：可判斷SSID來源，結合AD或Samba dc，透過winbind搭配PEAP-MSCHAPv2進行驗證，具備群組放行、群組VLAN與黑名單機制，可設定單日帳號使用裝置上限
+- **Google Workspace 帳號**：可判斷SSID來源，開啟Google Workspace LDAP功能後，透過Google Secure LDAP 驗證，具備機構放行、機構VLAN與黑名單機制，可設定單日帳號使用裝置上限
+- **Proxy 代理**：可判斷SSID來源，將使用者認證機制轉發至外部radius(像是eduroam)，具備帳號黑名單+白名單（關鍵字）過濾機制，可設定單日單一帳號使用裝置上限
 
 # 系統功能：
 - **平台相容性最佳化**：ios / android / windows 可直接連線，無須另外安裝描述檔或特定軟體
